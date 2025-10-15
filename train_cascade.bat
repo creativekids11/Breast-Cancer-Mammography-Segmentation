@@ -44,7 +44,7 @@ python cascade_segmentation_model.py ^
     --tissue-data-dir segmentation_data/train_valid ^
     --cancer-csv unified_segmentation_dataset.csv ^
     --epochs-stage1 20 ^
-    --epochs-stage2 50 ^
+    --epochs-stage2 120 ^
     --lr-stage1 5e-4 ^
     --lr-stage2 1e-3 ^
     --batch-size-stage1 8 ^
@@ -73,3 +73,4 @@ echo   python cascade_inference.py --stage1-weights checkpoints_cascade/stage1/b
 echo.
 
 pause
+
