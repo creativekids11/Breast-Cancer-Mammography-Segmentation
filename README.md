@@ -1,7 +1,7 @@
     `Breast Cancer Segmentation` is a project made by ~ Devansh Madake
 <hr>
 
-**NOTE: USE COMMAND `git lfs clone _____` for cloning this repo, due to large dataset files**
+**NOTE: USE COMMAND `git lfs clone https://github.com/creativekids11/Breast-Cancer-Mammography-Segmentation.git` for cloning this repo, due to large dataset files**
 
 In this breast cancer segmentation model is trained on data of CBIS-DDSM, MIAS, IN-Breast.
 A lot thanks for the data providers to give the data for free
