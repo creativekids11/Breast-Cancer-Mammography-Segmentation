@@ -98,6 +98,275 @@ A pure-from-scratch U-Net variant that stacks the `Down`/`ASPP`/`UpACA` componen
 
 Though this model may seem complex it offer a fast inference on codes
 
+# Cascade Staged Segmentation Model for Breast Cancer Detection
+
+## Overview
+
+This project implements a **two-stage cascade segmentation model** using **ACA-ResUNet** architecture for breast cancer detection from mammography images.
+
+### Architecture
+
+#### Stage 1: Tissue Segmentation
+- **Input**: Full mammogram image (grayscale)
+- **Output**: Multi-class segmentation (4 classes)
+  - Class 0: Background
+  - Class 1: Adipose tissue
+  - Class 2: Fibroglandular tissue (FGT) - **Region of Interest**
+  - Class 3: Pectoral muscle
+- **Model**: ACA-ResUNet with ResNet34 encoder
+- **Purpose**: Identify the fibroglandular tissue region where breast cancer typically occurs
+
+#### Stage 2: Cancer Segmentation
+- **Input**: Cropped FGT region from Stage 1
+- **Output**: Binary segmentation (cancer vs. normal tissue)
+- **Model**: ACA-ResUNet with ResNet34 encoder
+- **Purpose**: Detect and segment cancerous regions within the FGT
+
+### Why Cascade Approach?
+
+1. **Focus on Relevant Regions**: Fibroglandular tissue is where breast cancer develops. By segmenting it first, we can focus computational resources on the most important area.
+
+2. **Reduced False Positives**: By constraining cancer detection to FGT regions, we eliminate false positives from adipose tissue and pectoral muscle.
+
+3. **Better Feature Learning**: Each stage specializes in its task, leading to better overall performance.
+
+4. **Clinical Relevance**: Mirrors radiologist workflow - identify tissue types first, then focus on suspicious areas.
+
+## Data Structure
+
+### Stage 1 Data: Tissue Segmentation
+```
+segmentation_data/
+├── train_valid/
+│   ├── fgt_seg/              # Original mammogram images
+│   │   ├── A_0002_1.RIGHT_MLO.png
+│   │   └── ...
+│   └── fgt_seg_labels/       # Tissue segmentation masks
+│       ├── A_0002_1.RIGHT_MLO_LI.png
+│       └── ...
+└── test/
+    ├── fgt_seg/
+    └── fgt_seg_labels/
+```
+
+**Mask Values**:
+- 64: Adipose tissue
+- 128/192: Fibroglandular tissue (FGT)
+- 255: Pectoral muscle
+
+### Stage 2 Data: Cancer Segmentation
+Uses your existing cancer segmentation CSV:
+```
+unified_segmentation_dataset.csv
+```
+
+## Installation
+
+```bash
+# Install required packages
+pip install torch torchvision
+pip install segmentation-models-pytorch
+pip install albumentations
+pip install opencv-python
+pip install pandas numpy tqdm
+pip install tensorboard matplotlib
+```
+
+## Training
+
+### Train Both Stages Sequentially
+```bash
+python cascade_segmentation_model.py \
+    --train-both \
+    --tissue-data-dir segmentation_data/train_valid \
+    --cancer-csv unified_segmentation_dataset.csv \
+    --epochs-stage1 50 \
+    --epochs-stage2 100 \
+    --batch-size-stage1 8 \
+    --batch-size-stage2 12
+```
+
+### Train Stage 1 Only (Tissue Segmentation)
+```bash
+python cascade_segmentation_model.py \
+    --train-stage1 \
+    --tissue-data-dir segmentation_data/train_valid \
+    --epochs-stage1 50 \
+    --lr-stage1 1e-3 \
+    --batch-size-stage1 8 \
+    --img-size-stage1 512
+```
+
+### Train Stage 2 Only (Cancer Segmentation)
+```bash
+python cascade_segmentation_model.py \
+    --train-stage2 \
+    --cancer-csv unified_segmentation_dataset.csv \
+    --epochs-stage2 100 \
+    --lr-stage2 1e-3 \
+    --batch-size-stage2 12 \
+    --img-size-stage2 384
+```
+
+## Inference
+
+### Single Image Prediction
+```bash
+python cascade_inference.py \
+    --stage1-weights checkpoints_cascade/stage1/best_stage1.pth \
+    --stage2-weights checkpoints_cascade/stage2/best_stage2.pth \
+    --image path/to/mammogram.png \
+    --output-dir predictions
+```
+
+### Batch Prediction
+```bash
+python cascade_inference.py \
+    --stage1-weights checkpoints_cascade/stage1/best_stage1.pth \
+    --stage2-weights checkpoints_cascade/stage2/best_stage2.pth \
+    --image-dir path/to/image/folder \
+    --output-dir predictions
+```
+
+## Model Architecture Details
+
+### ACA-ResUNet Components
+
+1. **Encoder**: ResNet34 pretrained on ImageNet
+   - Captures hierarchical features from mammogram images
+   - 5 encoding stages with increasing receptive fields
+
+2. **ASPP (Atrous Spatial Pyramid Pooling)**
+   - Multiple parallel dilated convolutions
+   - Captures multi-scale context
+   - Dilation rates: 1, 6, 12, 18
+
+3. **ACA (Adaptive Context Aggregation) Module**
+   - **Channel Attention**: Emphasizes important feature channels
+   - **Spatial Attention**: Focuses on relevant spatial locations
+   - **Feature Fusion**: Combines attention-refined features
+
+4. **Decoder**: Progressive upsampling with skip connections
+   - 4 upsampling stages
+   - Each stage uses ACA module for skip connection refinement
+   - Gradually recovers spatial resolution
+
+### Loss Functions
+
+**Stage 1** (Multi-class):
+- Combination of Multi-class Dice Loss + Cross-Entropy Loss
+- Weights: 0.5 Dice + 0.5 CE
+
+**Stage 2** (Binary):
+- Dice-BCE Loss
+- Combines Dice coefficient for overlap + BCE for pixel-wise accuracy
+
+## Training Parameters
+
+### Stage 1: Tissue Segmentation
+- **Epochs**: 50
+- **Learning Rate**: 1e-3
+- **Optimizer**: AdamW (weight_decay=1e-4)
+- **Scheduler**: CosineAnnealingWarmRestarts (T_0=10, T_mult=2)
+- **Image Size**: 512x512
+- **Batch Size**: 8
+- **Augmentation**: Flip, Rotate, Brightness/Contrast, GaussNoise
+
+### Stage 2: Cancer Segmentation
+- **Epochs**: 100
+- **Learning Rate**: 1e-3
+- **Optimizer**: AdamW (weight_decay=1e-4)
+- **Scheduler**: CosineAnnealingWarmRestarts (T_0=15, T_mult=2)
+- **Image Size**: 384x384
+- **Batch Size**: 12
+- **Augmentation**: Flip, Rotate, Brightness/Contrast, ElasticTransform
+
+## Output Files
+
+After training:
+```
+checkpoints_cascade/
+├── stage1/
+│   ├── best_stage1.pth          # Best Stage 1 model
+│   └── stage1_epoch*.pth        # Epoch checkpoints
+└── stage2/
+    ├── best_stage2.pth          # Best Stage 2 model
+    └── stage2_epoch*.pth        # Epoch checkpoints
+
+runs/cascade_segmentation/       # TensorBoard logs
+├── stage1/
+└── stage2/
+```
+
+After inference:
+```
+predictions/
+├── image_name_tissue_seg.png      # Tissue segmentation mask
+├── image_name_fgt_mask.png        # FGT region mask
+├── image_name_cancer_prob.png     # Cancer probability map
+└── image_name_visualization.png   # Combined visualization
+```
+
+## Monitoring Training
+
+Use TensorBoard to monitor training progress:
+
+```bash
+tensorboard --logdir runs/cascade_segmentation
+```
+
+Metrics tracked:
+- Training/Validation Loss
+- Dice Score (FGT for Stage 1, Cancer for Stage 2)
+- Learning Rate
+
+## Expected Performance
+
+### Stage 1: Tissue Segmentation
+- **FGT Dice Score**: ~0.85-0.92
+- Accurately identifies fibroglandular tissue regions
+- Clear separation between tissue types
+
+### Stage 2: Cancer Segmentation
+- **Cancer Dice Score**: ~0.75-0.85 (depends on cancer dataset quality)
+- Focused detection within FGT regions
+- Reduced false positives
+
+## Key Features
+
+1. ✅ **Two-stage cascade architecture** for focused cancer detection
+2. ✅ **ACA-ResUNet** with attention mechanisms for better feature learning
+3. ✅ **ASPP** for multi-scale context aggregation
+4. ✅ **Automatic FGT ROI extraction** for Stage 2
+5. ✅ **Comprehensive augmentation** pipeline
+6. ✅ **TensorBoard logging** for monitoring
+7. ✅ **Modular design** - train stages independently or together
+8. ✅ **Visualization tools** for results interpretation
+
+## Troubleshooting
+
+### Out of Memory (OOM) Error
+- Reduce batch size: `--batch-size-stage1 4 --batch-size-stage2 6`
+- Reduce image size: `--img-size-stage1 384 --img-size-stage2 256`
+
+### Low Stage 1 Performance
+- Increase epochs: `--epochs-stage1 75`
+- Check data quality and mask values
+- Adjust learning rate: `--lr-stage1 5e-4`
+
+### Low Stage 2 Performance
+- Ensure Stage 1 is well-trained first
+- Check cancer dataset quality
+- Increase augmentation probability
+- Try different learning rate: `--lr-stage2 5e-4`
+
+## License
+This project is for research and educational purposes.
+
+## Authors
+Devansh Madake
+Created for Hackathon 2.0 - Breast Cancer AI Project
+
 # Data Preproccessing
 * The data is pre-proccessed with convectional CLAHE and Median filter.
 * Just for experimental purposes the texture(glcm maps) overlay has been done also, which aids in giving a minute squeeze of dice scores.
@@ -105,4 +374,3 @@ Though this model may seem complex it offer a fast inference on codes
 # Testing Part
 * For testing the simple and fast cv2 platform is made with guide printed in terminal on execution
 * There is also a adaptive CLAHE feature which helps in giving the model more confidence on confusing images
-* The inference is done on 1024 x 1024 and 512 x 512 sizes of image. Such that the model being trained on 512 sized images tends to find more finer and small minute parts of cancer!
