@@ -45,10 +45,10 @@ python cascade_segmentation_model.py ^
     --cancer-csv unified_segmentation_dataset.csv ^
     --epochs-stage1 50 ^
     --epochs-stage2 100 ^
-    --lr-stage1 1e-3 ^
+    --lr-stage1 5e-4 ^
     --lr-stage2 1e-3 ^
     --batch-size-stage1 8 ^
-    --batch-size-stage2 12 ^
+    --batch-size-stage2 16 ^
     --img-size-stage1 512 ^
     --img-size-stage2 384 ^
     --num-workers 4 ^
