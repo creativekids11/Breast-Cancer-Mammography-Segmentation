@@ -51,21 +51,23 @@ class TissueSegmentationDataset(Dataset):
         self.transform = self._get_transforms()
     
     def _get_transforms(self):
+        common_transforms = [
+            A.Resize(self.img_size[0], self.img_size[1]),
+        ]
+        
         if self.augment:
-            return A.Compose([
-                A.Resize(self.img_size[0], self.img_size[1]),
+            aug_transforms = [
                 A.HorizontalFlip(p=0.5),
                 A.VerticalFlip(p=0.3),
                 A.Rotate(limit=15, p=0.5),
                 A.RandomBrightnessContrast(p=0.3),
                 A.GaussNoise(p=0.2),
-                ToTensorV2()
-            ], additional_targets={"mask": "mask"})
+            ]
+            transforms = common_transforms + aug_transforms + [ToTensorV2()]
         else:
-            return A.Compose([
-                A.Resize(self.img_size[0], self.img_size[1]),
-                ToTensorV2()
-            ], additional_targets={"mask": "mask"})
+            transforms = common_transforms + [ToTensorV2()]
+        
+        return A.Compose(transforms)
     
     def _convert_mask_to_classes(self, mask):
         """
@@ -97,8 +99,20 @@ class TissueSegmentationDataset(Dataset):
         
         # Apply transforms
         augmented = self.transform(image=img, mask=mask)
-        img_t = augmented["image"].float() / 255.0  # Normalize to [0, 1]
-        mask_t = torch.from_numpy(augmented["mask"]).long()
+        
+        # ToTensorV2 converts to tensor automatically
+        img_t = augmented["image"]
+        mask_t = augmented["mask"]
+        
+        # Ensure correct types
+        if not isinstance(img_t, torch.Tensor):
+            img_t = torch.from_numpy(img_t)
+        if not isinstance(mask_t, torch.Tensor):
+            mask_t = torch.from_numpy(mask_t)
+        
+        # Normalize image and ensure correct dtypes
+        img_t = img_t.float() / 255.0
+        mask_t = mask_t.long()
         
         return img_t, mask_t
 
@@ -121,21 +135,23 @@ class CancerROIDataset(Dataset):
         self.transform = self._get_transforms()
     
     def _get_transforms(self):
+        common_transforms = [
+            A.Resize(self.img_size[0], self.img_size[1]),
+        ]
+        
         if self.augment:
-            return A.Compose([
-                A.Resize(self.img_size[0], self.img_size[1]),
+            aug_transforms = [
                 A.HorizontalFlip(p=0.5),
                 A.VerticalFlip(p=0.3),
                 A.Rotate(limit=20, p=0.5),
                 A.RandomBrightnessContrast(p=0.3),
                 A.ElasticTransform(p=0.2),
-                ToTensorV2()
-            ], additional_targets={"mask": "mask"})
+            ]
+            transforms = common_transforms + aug_transforms + [ToTensorV2()]
         else:
-            return A.Compose([
-                A.Resize(self.img_size[0], self.img_size[1]),
-                ToTensorV2()
-            ], additional_targets={"mask": "mask"})
+            transforms = common_transforms + [ToTensorV2()]
+        
+        return A.Compose(transforms)
     
     def __len__(self):
         return len(self.image_paths)
@@ -154,8 +170,20 @@ class CancerROIDataset(Dataset):
         mask = ((mask > 0).astype(np.uint8) * 255)
         
         augmented = self.transform(image=img, mask=mask)
-        img_t = augmented["image"].float() / 255.0
-        mask_t = augmented["mask"].unsqueeze(0).float() / 255.0
+        
+        # ToTensorV2 converts to tensor automatically
+        img_t = augmented["image"]
+        mask_t = augmented["mask"]
+        
+        # Ensure correct types
+        if not isinstance(img_t, torch.Tensor):
+            img_t = torch.from_numpy(img_t)
+        if not isinstance(mask_t, torch.Tensor):
+            mask_t = torch.from_numpy(mask_t)
+        
+        # Normalize and reshape
+        img_t = img_t.float() / 255.0
+        mask_t = mask_t.unsqueeze(0).float() / 255.0
         
         return img_t, mask_t
 
