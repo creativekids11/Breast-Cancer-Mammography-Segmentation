@@ -43,8 +43,8 @@ python cascade_segmentation_model.py ^
     --train-both ^
     --tissue-data-dir segmentation_data/train_valid ^
     --cancer-csv unified_segmentation_dataset.csv ^
-    --epochs-stage1 50 ^
-    --epochs-stage2 100 ^
+    --epochs-stage1 20 ^
+    --epochs-stage2 50 ^
     --lr-stage1 5e-4 ^
     --lr-stage2 1e-3 ^
     --batch-size-stage1 8 ^
