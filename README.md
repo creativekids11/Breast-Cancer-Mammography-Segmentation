@@ -371,7 +371,6 @@ Created for Hackathon 2.0 - Breast Cancer AI Project
 
 # Data Preproccessing
 * The data is pre-proccessed with convectional CLAHE and Median filter.
-* Just for experimental purposes the texture(glcm maps) overlay has been done also, which aids in giving a minute squeeze of dice scores.
 
 # Testing Part
 * For testing the simple and fast cv2 platform is made with guide printed in terminal on execution
