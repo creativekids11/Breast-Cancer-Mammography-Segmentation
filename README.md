@@ -1,7 +1,7 @@
     `Breast Cancer Segmentation` is a project made by ~ Devansh Madake
 <hr>
 
-**NOTE: USE COMMAND `git lfs clone https://github.com/creativekids11/Breast-Cancer-Mammography-Segmentation.git` for cloning this repo, due to large dataset files**
+**NOTE: USE COMMAND `git lfs clone https://github.com/creativekids11/Breast-Cancer-Mammography-Segmentation.git` for cloning this repo, due to large files**
 
 In this 2nd stage breast cancer segmentation model is trained on data of `The Complete Mini-DDSM` (5 gb) and `CBIS-DDSM`.
 With the stage 1 model trained on data given on: https://github.com/tiryakiv/Mammogram-segmentation
