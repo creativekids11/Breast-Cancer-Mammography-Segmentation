@@ -25,7 +25,7 @@ fi
 echo ""
 echo "[2/3] Training configuration:"
 echo "  - Stage 1: Tissue Segmentation (50 epochs)"
-echo "  - Stage 2: Cancer Segmentation (100 epochs)"
+echo "  - Stage 2: Cancer Segmentation (120 epochs)"
 echo "  - Total training time: ~8-12 hours (GPU) or 24-36 hours (CPU)"
 echo ""
 
@@ -42,9 +42,9 @@ python3 cascade_segmentation_model.py \
     --tissue-data-dir segmentation_data/train_valid \
     --cancer-csv unified_segmentation_dataset.csv \
     --epochs-stage1 50 \
-    --epochs-stage2 100 \
+    --epochs-stage2 120 \
     --lr-stage1 1e-3 \
-    --lr-stage2 1e-3 \
+    --lr-stage2 3e-4 \
     --batch-size-stage1 8 \
     --batch-size-stage2 12 \
     --img-size-stage1 512 \
@@ -52,7 +52,8 @@ python3 cascade_segmentation_model.py \
     --num-workers 4 \
     --stage1-checkpoint-dir checkpoints_cascade/stage1 \
     --stage2-checkpoint-dir checkpoints_cascade/stage2 \
-    --logdir runs/cascade_segmentation
+    --logdir runs/cascade_segmentation \
+    --l1-lambda 5e-5
 
 echo ""
 echo "========================================"
