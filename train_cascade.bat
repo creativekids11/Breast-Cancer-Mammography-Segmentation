@@ -29,8 +29,8 @@ if errorlevel 1 (
 
 echo.
 echo [2/3] Training configuration:
-echo   - Stage 1: Tissue Segmentation (50 epochs)
-echo   - Stage 2: Cancer Segmentation (120 epochs)
+echo   - Stage 1: Tissue Segmentation (30 epochs)
+echo   - Stage 2: Cancer Segmentation (150 epochs)
 echo   - Total training time: ~8-12 hours (GPU) or 24-36 hours (CPU)
 echo.
 
@@ -48,8 +48,8 @@ python cascade_segmentation_model.py ^
     --train-both ^
     --tissue-data-dir segmentation_data/train_valid ^
     --cancer-csv unified_segmentation_dataset.csv ^
-    --epochs-stage1 50 ^
-    --epochs-stage2 120 ^
+    --epochs-stage1 30 ^
+    --epochs-stage2 150 ^
     --lr-stage1 1e-3 ^
     --lr-stage2 3e-4 ^
     --batch-size-stage1 8 ^
@@ -79,3 +79,4 @@ echo   python cascade_inference.py --stage1-weights checkpoints_cascade/stage1/b
 echo.
 
 pause
+
