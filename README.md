@@ -3,8 +3,10 @@
 
 **NOTE: USE COMMAND `git lfs clone https://github.com/creativekids11/Breast-Cancer-Mammography-Segmentation.git` for cloning this repo, due to large dataset files**
 
-In this breast cancer segmentation model is trained on data of CBIS-DDSM, MIAS, IN-Breast.
+In this breast cancer segmentation model is trained on data of `The Complete Mini-DDSM` (54 gb).
 A lot thanks for the data providers to give the data for free
+
+The used model and methodologies archieve a high ~0.81 dice scores
 
 # Summary of used type of: ACAAtrousResUNet
 
