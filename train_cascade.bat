@@ -1,11 +1,14 @@
 @echo off
+
 REM Quick Start Script for Cascade Segmentation Training
+
 REM Windows PowerShell Version
 
 echo ========================================
 echo Cascade Segmentation Model Training
 echo ========================================
 echo.
+
 
 REM Check if Python is available
 python --version >nul 2>&1
@@ -27,9 +30,10 @@ if errorlevel 1 (
 echo.
 echo [2/3] Training configuration:
 echo   - Stage 1: Tissue Segmentation (50 epochs)
-echo   - Stage 2: Cancer Segmentation (100 epochs)
+echo   - Stage 2: Cancer Segmentation (120 epochs)
 echo   - Total training time: ~8-12 hours (GPU) or 24-36 hours (CPU)
 echo.
+
 
 REM Check if CUDA is available
 python -c "import torch; print('GPU Available!' if torch.cuda.is_available() else 'Using CPU (slower)')"
@@ -38,19 +42,21 @@ echo.
 echo [3/3] Starting cascade training...
 echo.
 
+
 REM Run training
 python cascade_segmentation_model.py ^
     --train-both ^
     --tissue-data-dir segmentation_data/train_valid ^
     --cancer-csv unified_segmentation_dataset.csv ^
-    --epochs-stage1 20 ^
+    --epochs-stage1 50 ^
     --epochs-stage2 120 ^
-    --lr-stage1 5e-4 ^
-    --lr-stage2 1e-3 ^
+    --lr-stage1 1e-3 ^
+    --lr-stage2 3e-4 ^
     --batch-size-stage1 8 ^
-    --batch-size-stage2 16 ^
+    --batch-size-stage2 12 ^
     --img-size-stage1 512 ^
     --img-size-stage2 384 ^
+    --l1-lambda 5e-5 ^
     --num-workers 4 ^
     --stage1-checkpoint-dir checkpoints_cascade/stage1 ^
     --stage2-checkpoint-dir checkpoints_cascade/stage2 ^
@@ -73,4 +79,3 @@ echo   python cascade_inference.py --stage1-weights checkpoints_cascade/stage1/b
 echo.
 
 pause
-
