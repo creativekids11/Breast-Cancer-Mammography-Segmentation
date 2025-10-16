@@ -346,23 +346,6 @@ Metrics tracked:
 7. ✅ **Modular design** - train stages independently or together
 8. ✅ **Visualization tools** for results interpretation
 
-## Troubleshooting
-
-### Out of Memory (OOM) Error
-- Reduce batch size: `--batch-size-stage1 4 --batch-size-stage2 6`
-- Reduce image size: `--img-size-stage1 384 --img-size-stage2 256`
-
-### Low Stage 1 Performance
-- Increase epochs: `--epochs-stage1 75`
-- Check data quality and mask values
-- Adjust learning rate: `--lr-stage1 5e-4`
-
-### Low Stage 2 Performance
-- Ensure Stage 1 is well-trained first
-- Check cancer dataset quality
-- Increase augmentation probability
-- Try different learning rate: `--lr-stage2 5e-4`
-
 ## License
 This project is for research and educational purposes.
 
