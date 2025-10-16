@@ -193,12 +193,12 @@ class CancerROIDataset(Dataset):
 
 class MiniDDSMDataset(Dataset):
     """
-    Dataset for Mini-DDSM with metadata from an Excel file.
+    Dataset for Mini-DDSM with metadata from a CSV file.
     """
-    def __init__(self, excel_file: str, base_dir: str, img_size: Tuple[int, int] = (384, 384), augment: bool = False):
-        df = pd.read_excel(excel_file, sheet_name="Data")
-        self.image_paths = [os.path.join(base_dir, path) for path in df["fullPath"].tolist()]
-        self.mask_paths = [os.path.join(base_dir, path) if pd.notna(path) else None for path in df["Tumour_Contour"].tolist()]
+    def __init__(self, csv_file: str, base_dir: str, img_size: Tuple[int, int] = (384, 384), augment: bool = False):
+        df = pd.read_csv(csv_file)
+        self.image_paths = [os.path.join(base_dir, path) for path in df["image_file_path"].tolist()]
+        self.mask_paths = [os.path.join(base_dir, path) if pd.notna(path) else None for path in df["roi_mask_file_path"].tolist()]
         self.img_size = img_size
         self.augment = augment
         self.transform = self._get_transforms()
@@ -884,37 +884,28 @@ def main():
         print("Preparing Stage 2: Cancer Segmentation Data")
         print("="*60)
         
-        if not os.path.exists(args.cancer_csv):
-            print(f"Error: Cancer CSV not found at {args.cancer_csv}")
-            return
+        if not os.path.exists(args.stage2_checkpoint_dir):
+            os.makedirs(args.stage2_checkpoint_dir)
         
-        # Create datasets
-        full_dataset = CancerROIDataset(
-            args.cancer_csv,
+        df = pd.read_csv(args.cancer_csv)
+        df["image_file_path"] = df["image_file_path"].apply(lambda x: os.path.join(args.tissue_data_dir, x))
+        df["roi_mask_file_path"] = df["roi_mask_file_path"].apply(lambda x: os.path.join(args.tissue_data_dir, x) if pd.notna(x) else None)
+        
+        train_df, val_df = train_test_split(df, test_size=0.2, random_state=42)
+        
+        train_dataset = CancerROIDataset(
+            csv_file=args.cancer_csv,
             img_size=(args.img_size_stage2, args.img_size_stage2),
             augment=True
         )
-        
-        # Integrate Mini-DDSM dataset
-        mini_ddsm_dataset = MiniDDSMDataset(
-            excel_file="path/to/mini-ddsm.xlsx",
-            base_dir="path/to/MINI-DDSM-Complete-JPEG-8",
+        val_dataset = CancerROIDataset(
+            csv_file=args.cancer_csv,
             img_size=(args.img_size_stage2, args.img_size_stage2),
-            augment=True
+            augment=False
         )
-
-        # Combine datasets
-        full_dataset = torch.utils.data.ConcatDataset([full_dataset, mini_ddsm_dataset])
-
-        # Split into train/val
-        val_size = int(len(full_dataset) * 0.2)
-        train_size = len(full_dataset) - val_size
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            full_dataset, [train_size, val_size]
-        )
-
+        
         train_loader = DataLoader(
-            train_dataset,
+            train_dataset, 
             batch_size=args.batch_size_stage2,
             shuffle=True,
             num_workers=args.num_workers,
@@ -924,20 +915,15 @@ def main():
             val_dataset,
             batch_size=args.batch_size_stage2,
             shuffle=False,
-            num_workers=0,  # Memory safe for large images
+            num_workers=args.num_workers,
             pin_memory=True
         )
-
+        
         # Create and train Stage 2 model
         stage2_model = ACAAtrousResUNet(in_ch=1, out_ch=1, encoder_name="resnet34")
         stage2_model = train_stage2(stage2_model, train_loader, val_loader, args)
     
-    print("\n" + "="*60)
-    print("Cascade Training Complete!")
-    print("="*60)
-    print(f"Stage 1 checkpoints: {args.stage1_checkpoint_dir}")
-    print(f"Stage 2 checkpoints: {args.stage2_checkpoint_dir}")
-    print(f"TensorBoard logs: {args.logdir}")
+    print("Training pipeline complete.")
 
 if __name__ == "__main__":
     main()
