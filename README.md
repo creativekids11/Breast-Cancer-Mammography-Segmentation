@@ -180,35 +180,52 @@ pip install tensorboard matplotlib
 ### Train Both Stages Sequentially
 ```bash
 python cascade_segmentation_model.py \
-    --train-both \
-    --tissue-data-dir segmentation_data/train_valid \
-    --cancer-csv unified_segmentation_dataset.csv \
-    --epochs-stage1 50 \
-    --epochs-stage2 100 \
-    --batch-size-stage1 8 \
-    --batch-size-stage2 12
+  --train-both \
+  --tissue-data-dir segmentation_data/train_valid \
+  --cancer-csv unified_segmentation_dataset.csv \
+  --epochs-stage1 30 \
+  --epochs-stage2 150 \
+  --lr-stage1 1e-3 \
+  --lr-stage2 3e-4 \
+  --batch-size-stage1 8 \
+  --batch-size-stage2 12 \
+  --img-size-stage1 512 \
+  --img-size-stage2 384 \
+  --l1-lambda 5e-5 \
+  --num-workers 4 \
+  --stage1-checkpoint-dir checkpoints_cascade/stage1 \
+  --stage2-checkpoint-dir checkpoints_cascade/stage2 \
+  --logdir runs/cascade_segmentation
 ```
 
 ### Train Stage 1 Only (Tissue Segmentation)
 ```bash
 python cascade_segmentation_model.py \
-    --train-stage1 \
-    --tissue-data-dir segmentation_data/train_valid \
-    --epochs-stage1 50 \
-    --lr-stage1 1e-3 \
-    --batch-size-stage1 8 \
-    --img-size-stage1 512
+  --train-stage1 \
+  --tissue-data-dir segmentation_data/train_valid \
+  --epochs-stage1 30 \
+  --lr-stage1 1e-3 \
+  --batch-size-stage1 8 \
+  --img-size-stage1 512 \
+  --l1-lambda 5e-5 \
+  --num-workers 4 \
+  --stage1-checkpoint-dir checkpoints_cascade/stage1 \
+  --logdir runs/cascade_segmentation
 ```
 
 ### Train Stage 2 Only (Cancer Segmentation)
 ```bash
 python cascade_segmentation_model.py \
-    --train-stage2 \
-    --cancer-csv unified_segmentation_dataset.csv \
-    --epochs-stage2 100 \
-    --lr-stage2 1e-3 \
-    --batch-size-stage2 12 \
-    --img-size-stage2 384
+  --train-stage2 \
+  --cancer-csv unified_segmentation_dataset.csv \
+  --epochs-stage2 150 \
+  --lr-stage2 3e-4 \
+  --batch-size-stage2 12 \
+  --img-size-stage2 384 \
+  --l1-lambda 5e-5 \
+  --num-workers 4 \
+  --stage2-checkpoint-dir checkpoints_cascade/stage2 \
+  --logdir runs/cascade_segmentation
 ```
 
 ## Inference
