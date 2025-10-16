@@ -25,7 +25,7 @@ from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 
 import albumentations as A
@@ -125,9 +125,14 @@ class CancerROIDataset(Dataset):
     Dataset for Stage 2: Binary cancer segmentation within FGT regions
     This uses the original cancer segmentation CSV
     """
-    def __init__(self, csv_file: str, img_size: Tuple[int, int] = (384, 384), 
-                 augment: bool = False):
-        df = pd.read_csv(csv_file)
+    def __init__(self, csv_file: Optional[str] = None, img_size: Tuple[int, int] = (384, 384), 
+                 augment: bool = False, dataframe: Optional[pd.DataFrame] = None):
+        if dataframe is not None:
+            df = dataframe.copy()
+        else:
+            if csv_file is None:
+                raise ValueError("Either csv_file or dataframe must be provided for CancerROIDataset")
+            df = pd.read_csv(csv_file)
         self.image_paths = df["image_file_path"].tolist()
         self.mask_paths = df["roi_mask_file_path"].tolist()
         self.img_size = img_size
@@ -552,15 +557,22 @@ class MultiClassDiceLoss(nn.Module):
 # Training Functions
 # ========================================
 
+def l1_regularization(model, lambda_l1=1e-5):
+    """Compute L1 regularization loss"""
+    l1_loss = 0.0
+    for param in model.parameters():
+        l1_loss += torch.norm(param, 1)
+    return lambda_l1 * l1_loss
+
 def train_stage1(model, train_loader, val_loader, args):
     """Train Stage 1: Tissue Segmentation"""
     print("\n" + "="*60)
     print("STAGE 1: Training Tissue Segmentation Model")
     print("="*60)
-    
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-    
+
     # Loss and optimizer
     criterion = MultiClassDiceLoss()
     ce_criterion = nn.CrossEntropyLoss()
@@ -568,83 +580,84 @@ def train_stage1(model, train_loader, val_loader, args):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer, T_0=10, T_mult=2, eta_min=1e-6
     )
-    
+
     # TensorBoard
     writer = SummaryWriter(log_dir=os.path.join(args.logdir, "stage1"))
     os.makedirs(args.stage1_checkpoint_dir, exist_ok=True)
-    
+
     best_val_dice = 0.0
-    
+
     for epoch in range(1, args.epochs_stage1 + 1):
         # Training
         model.train()
         train_loss = 0.0
-        
+
         pbar = tqdm(train_loader, desc=f"Stage1 Train E{epoch}/{args.epochs_stage1}")
         for imgs, masks in pbar:
             imgs, masks = imgs.to(device), masks.to(device)
-            
+
             optimizer.zero_grad()
             outputs = model(imgs)
-            
+
             loss_dice = criterion(outputs, masks)
             loss_ce = ce_criterion(outputs, masks)
-            loss = 0.5 * loss_dice + 0.5 * loss_ce
-            
+            l1_loss = l1_regularization(model, args.l1_lambda)
+            loss = 0.5 * loss_dice + 0.5 * loss_ce + l1_loss
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            
+
             train_loss += loss.item()
             pbar.set_postfix(loss=f"{loss.item():.4f}")
-        
+
         avg_train_loss = train_loss / len(train_loader)
         writer.add_scalar("train/loss", avg_train_loss, epoch)
-        
+
         # Validation
         model.eval()
         val_loss = 0.0
         val_dice = 0.0
-        
+
         with torch.no_grad():
             for imgs, masks in tqdm(val_loader, desc=f"Stage1 Val E{epoch}"):
                 imgs, masks = imgs.to(device), masks.to(device)
-                
+
                 outputs = model(imgs)
                 loss = criterion(outputs, masks)
                 val_loss += loss.item()
-                
+
                 # Calculate Dice for FGT class (class 2)
                 preds = torch.argmax(outputs, dim=1)
                 fgt_pred = (preds == 2).float()
                 fgt_target = (masks == 2).float()
-                
+
                 intersection = (fgt_pred * fgt_target).sum()
                 dice = (2. * intersection + 1e-5) / (fgt_pred.sum() + fgt_target.sum() + 1e-5)
                 val_dice += dice.item()
-        
+
         avg_val_loss = val_loss / len(val_loader)
         avg_val_dice = val_dice / len(val_loader)
-        
+
         writer.add_scalar("val/loss", avg_val_loss, epoch)
         writer.add_scalar("val/dice_fgt", avg_val_dice, epoch)
-        
+
         print(f"Epoch {epoch}: Train Loss={avg_train_loss:.4f}, Val Loss={avg_val_loss:.4f}, Val Dice(FGT)={avg_val_dice:.4f}")
-        
+
         # Save best model
         if avg_val_dice > best_val_dice:
             best_val_dice = avg_val_dice
             save_path = os.path.join(args.stage1_checkpoint_dir, "best_stage1.pth")
             torch.save(model.state_dict(), save_path)
-            print(f"✓ Saved best Stage 1 model (Dice: {best_val_dice:.4f})")
-        
+            print(f"\u2713 Saved best Stage 1 model (Dice: {best_val_dice:.4f})")
+
         # Save checkpoint
         if epoch % 10 == 0:
             save_path = os.path.join(args.stage1_checkpoint_dir, f"stage1_epoch{epoch}.pth")
             torch.save(model.state_dict(), save_path)
-        
+
         scheduler.step()
-    
+
     writer.close()
     print(f"\nStage 1 training complete! Best Val Dice: {best_val_dice:.4f}")
     return model
@@ -654,59 +667,60 @@ def train_stage2(model, train_loader, val_loader, args):
     print("\n" + "="*60)
     print("STAGE 2: Training Cancer Segmentation Model")
     print("="*60)
-    
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-    
+
     # Loss and optimizer
     criterion = DiceBCELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr_stage2, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer, T_0=15, T_mult=2, eta_min=1e-6
     )
-    
+
     # TensorBoard
     writer = SummaryWriter(log_dir=os.path.join(args.logdir, "stage2"))
     os.makedirs(args.stage2_checkpoint_dir, exist_ok=True)
-    
+
     best_val_dice = 0.0
-    
+
     for epoch in range(1, args.epochs_stage2 + 1):
         # Training
         model.train()
         train_loss = 0.0
-        
+
         pbar = tqdm(train_loader, desc=f"Stage2 Train E{epoch}/{args.epochs_stage2}")
         for imgs, masks in pbar:
             imgs, masks = imgs.to(device), masks.to(device)
-            
+
             optimizer.zero_grad()
             outputs = model(imgs)
-            
-            loss = criterion(outputs, masks)
+
+            l1_loss = l1_regularization(model, args.l1_lambda)
+            loss = criterion(outputs, masks) + l1_loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            
+
             train_loss += loss.item()
             pbar.set_postfix(loss=f"{loss.item():.4f}")
-        
+
         avg_train_loss = train_loss / len(train_loader)
         writer.add_scalar("train/loss", avg_train_loss, epoch)
-        
+
         # Validation
         model.eval()
         val_loss = 0.0
         val_dice = 0.0
-        
+
         with torch.no_grad():
             for imgs, masks in tqdm(val_loader, desc=f"Stage2 Val E{epoch}"):
                 imgs, masks = imgs.to(device), masks.to(device)
-                
+
                 outputs = model(imgs)
                 loss = criterion(outputs, masks)
                 val_loss += loss.item()
-                
+
                 # Dice score
                 preds = torch.sigmoid(outputs)
                 preds_bin = (preds > 0.5).float()
@@ -714,29 +728,29 @@ def train_stage2(model, train_loader, val_loader, args):
                 intersection = (preds_bin * masks).sum()
                 dice = (2. * intersection + 1e-5) / (preds_bin.sum() + masks.sum() + 1e-5)
                 val_dice += dice.item()
-        
+
         avg_val_loss = val_loss / len(val_loader)
         avg_val_dice = val_dice / len(val_loader)
-        
+
         writer.add_scalar("val/loss", avg_val_loss, epoch)
         writer.add_scalar("val/dice", avg_val_dice, epoch)
-        
+
         print(f"Epoch {epoch}: Train Loss={avg_train_loss:.4f}, Val Loss={avg_val_loss:.4f}, Val Dice={avg_val_dice:.4f}")
-        
+
         # Save best model
         if avg_val_dice > best_val_dice:
             best_val_dice = avg_val_dice
             save_path = os.path.join(args.stage2_checkpoint_dir, "best_stage2.pth")
             torch.save(model.state_dict(), save_path)
-            print(f"✓ Saved best Stage 2 model (Dice: {best_val_dice:.4f})")
-        
+            print(f"\u2713 Saved best Stage 2 model (Dice: {best_val_dice:.4f})")
+
         # Save checkpoint
         if epoch % 10 == 0:
             save_path = os.path.join(args.stage2_checkpoint_dir, f"stage2_epoch{epoch}.pth")
             torch.save(model.state_dict(), save_path)
-        
+
         scheduler.step()
-    
+
     writer.close()
     print(f"\nStage 2 training complete! Best Val Dice: {best_val_dice:.4f}")
     return model
@@ -757,7 +771,7 @@ def get_args():
                        help="Path to cancer segmentation CSV")
     
     # Stage 1 parameters
-    parser.add_argument("--epochs-stage1", type=int, default=50,
+    parser.add_argument("--epochs-stage1", type=int, default=30,
                        help="Number of epochs for Stage 1")
     parser.add_argument("--lr-stage1", type=float, default=1e-3,
                        help="Learning rate for Stage 1")
@@ -767,9 +781,9 @@ def get_args():
                        help="Batch size for Stage 1")
     
     # Stage 2 parameters
-    parser.add_argument("--epochs-stage2", type=int, default=100,
+    parser.add_argument("--epochs-stage2", type=int, default=150,
                        help="Number of epochs for Stage 2")
-    parser.add_argument("--lr-stage2", type=float, default=1e-3,
+    parser.add_argument("--lr-stage2", type=float, default=3e-4,
                        help="Learning rate for Stage 2")
     parser.add_argument("--img-size-stage2", type=int, default=384,
                        help="Image size for Stage 2")
@@ -789,6 +803,9 @@ def get_args():
                        default="runs/cascade_segmentation",
                        help="TensorBoard log directory")
     
+    # Regularization / Training control
+    parser.add_argument("--l1-lambda", type=float, default=5e-5,
+                       help="L1 regularization strength")
     # Training control
     parser.add_argument("--train-stage1", action="store_true",
                        help="Train Stage 1 (tissue segmentation)")
@@ -894,20 +911,35 @@ def main():
         train_df, val_df = train_test_split(df, test_size=0.2, random_state=42)
         
         train_dataset = CancerROIDataset(
-            csv_file=args.cancer_csv,
             img_size=(args.img_size_stage2, args.img_size_stage2),
-            augment=True
+            augment=True,
+            dataframe=train_df
         )
         val_dataset = CancerROIDataset(
-            csv_file=args.cancer_csv,
             img_size=(args.img_size_stage2, args.img_size_stage2),
-            augment=False
+            augment=False,
+            dataframe=val_df
         )
-        
+
+        # Build weighted sampler to mitigate class imbalance (positive vs negative masks)
+        # Label 1 if mask has any positive pixels else 0
+        labels = []
+        for mpath in train_dataset.mask_paths:
+            try:
+                m = cv2.imread(mpath, cv2.IMREAD_GRAYSCALE)
+                labels.append(1 if (m is not None and np.any(m > 0)) else 0)
+            except Exception:
+                labels.append(0)
+        class_counts = np.bincount(labels, minlength=2)
+        class_counts[class_counts == 0] = 1
+        class_weights = 1.0 / class_counts
+        sample_weights = [float(class_weights[l]) for l in labels]
+        sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
+
         train_loader = DataLoader(
             train_dataset, 
             batch_size=args.batch_size_stage2,
-            shuffle=True,
+            sampler=sampler,
             num_workers=args.num_workers,
             pin_memory=True
         )
