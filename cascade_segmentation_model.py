@@ -128,42 +128,52 @@ class CancerROIDataset(Dataset):
     def __init__(self, csv_file: Optional[str] = None, img_size: Tuple[int, int] = (384, 384), 
                  augment: bool = False, dataframe: Optional[pd.DataFrame] = None):
         if dataframe is not None:
-            df = dataframe.copy()
+            df = dataframe
         else:
-            if csv_file is None:
-                raise ValueError("Either csv_file or dataframe must be provided for CancerROIDataset")
             df = pd.read_csv(csv_file)
+        
+        # Filter out rows with missing or unreadable files
+        valid_rows = []
+        for _, row in df.iterrows():
+            img_path = row["image_file_path"]
+            mask_path = row["roi_mask_file_path"]
+            if os.path.exists(img_path) and (pd.isna(mask_path) or os.path.exists(mask_path)):
+                valid_rows.append(row)
+            else:
+                print(f"[WARNING] Skipping missing file: {img_path} or {mask_path}")
+        
+        df = pd.DataFrame(valid_rows)
+        
         self.image_paths = df["image_file_path"].tolist()
         self.mask_paths = df["roi_mask_file_path"].tolist()
         self.img_size = img_size
         self.augment = augment
         self.transform = self._get_transforms()
-    
+
     def _get_transforms(self):
         common_transforms = [
             A.Resize(self.img_size[0], self.img_size[1]),
         ]
         
         if self.augment:
-            aug_transforms = [
+            transforms = common_transforms + [
                 A.HorizontalFlip(p=0.5),
-                A.VerticalFlip(p=0.3),
-                A.Rotate(limit=20, p=0.5),
-                A.RandomBrightnessContrast(p=0.3),
-                A.ElasticTransform(p=0.2),
+                A.RandomBrightnessContrast(p=0.2),
+                A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=15, p=0.5),
             ]
-            transforms = common_transforms + aug_transforms + [ToTensorV2()]
         else:
-            transforms = common_transforms + [ToTensorV2()]
+            transforms = common_transforms
         
         return A.Compose(transforms)
-    
+
     def __len__(self):
         return len(self.image_paths)
     
     def __getitem__(self, idx):
         img = cv2.imread(self.image_paths[idx], cv2.IMREAD_GRAYSCALE)
-        mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_GRAYSCALE)
+        mask = None
+        if self.mask_paths[idx]:
+            mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_GRAYSCALE)
         
         if img is None:
             raise RuntimeError(f"Failed to load: {self.image_paths[idx]}")
@@ -182,9 +192,9 @@ class CancerROIDataset(Dataset):
         
         # Ensure correct types
         if not isinstance(img_t, torch.Tensor):
-            img_t = torch.from_numpy(img_t)
+            img_t = torch.tensor(img_t, dtype=torch.float32)
         if not isinstance(mask_t, torch.Tensor):
-            mask_t = torch.from_numpy(mask_t)
+            mask_t = torch.tensor(mask_t, dtype=torch.float32)
         
         # Normalize and reshape
         img_t = img_t.float() / 255.0
