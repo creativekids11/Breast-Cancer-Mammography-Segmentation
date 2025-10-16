@@ -503,8 +503,8 @@ def get_args() -> argparse.Namespace:
     # Training Hyperparameters
     p.add_argument("--epochs", type=int, default=125, help="Number of training epochs.")
     p.add_argument("--lr", type=float, default=1e-3, help="Initial learning rate.")
-    p.add_argument("--pos-weight", type=float, default=9.0, help="Positive class weight for BCE loss.")
-    p.add_argument("--l1-lambda", type=float, default=4.5e-5, help="L1 regularization strength.")
+    p.add_argument("--pos-weight", type=float, default=11.0, help="Positive class weight for BCE loss.")
+    p.add_argument("--l1-lambda", type=float, default=5e-5, help="L1 regularization strength.")
 
     # Model Selection
     p.add_argument("--model", type=str, default="aca-atrous-resunet",
@@ -556,8 +556,118 @@ def setup_dataloaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader]
 
     return train_loader, val_loader
 
-def create_model(model_name: str, device: torch.device, img_size: int) -> nn.Module:
-    """Instantiates the selected model and runs a dummy forward to init lazy modules."""
+# ----------------------------
+# Checkpoint-aware model instantiation / robust loading helpers
+# ----------------------------
+import torch
+
+def _unwrap_state_dict(raw):
+    """Return a raw state_dict from typical torch.save formats."""
+    if isinstance(raw, dict):
+        # common wrappers
+        if "state_dict" in raw:
+            return raw["state_dict"]
+        # sometimes saved with 'model_state_dict' etc.
+        for key in ("model_state_dict", "state_dict", "net", "model"):
+            if key in raw and isinstance(raw[key], dict):
+                return raw[key]
+    return raw if isinstance(raw, dict) else {}
+
+def _partial_load_state_dict(model: torch.nn.Module, state_dict: dict):
+    """
+    Update model.state_dict() with any keys in state_dict that have matching shapes.
+    Returns tuple (num_loaded, num_skipped, loaded_keys, skipped_keys)
+    """
+    mstate = model.state_dict()
+    loaded_keys = []
+    skipped_keys = []
+    # Normalize keys (strip "module." if present) and match
+    for k_src, v in state_dict.items():
+        k = k_src
+        if k.startswith("module."):
+            k = k[len("module."):]
+        if k in mstate and mstate[k].shape == v.shape:
+            mstate[k] = v
+            loaded_keys.append(k)
+        else:
+            skipped_keys.append(k_src)
+    model.load_state_dict(mstate)
+    return len(loaded_keys), len(skipped_keys), loaded_keys, skipped_keys
+
+def load_model_from_checkpoint(ckpt_path: str, preferred_model_name: str = "aca-atrous-unet",
+                               device: torch.device = torch.device("cpu"),
+                               img_size: int = 512):
+    """
+    Infers which architecture the checkpoint corresponds to (checks for 'encoder' keys)
+    and returns an instantiated model with as many weights loaded as possible.
+
+    Returns (model, info_str, chosen_model_name)
+    """
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
+    raw = torch.load(ckpt_path, map_location="cpu")
+    state = _unwrap_state_dict(raw)
+
+    # decide which architecture matches checkpoint keys
+    keys = list(state.keys())
+    # heuristic: if keys contain 'encoder.' or 'encoder.encoder' likely saved from SMP-based model
+    has_encoder_keys = any(k.startswith("encoder.") or "encoder.encoder" in k or k.startswith("encoder.encoder") for k in keys)
+    chosen = preferred_model_name
+    if has_encoder_keys:
+        # prefer SMP-based wrapper model
+        chosen = "aca-atrous-resunet"
+    # instantiate model
+    models_map = {
+        "aca-atrous-unet": ACAAtrousUNet(in_ch=1, out_ch=1, base_ch=64),
+        "connect-unet": ConnectUNets(in_ch=1, out_ch=1, base_ch=64),
+        "smp-unet-resnet34": smp.Unet(encoder_name="resnet34", encoder_weights="imagenet", in_channels=1, classes=1),
+        "aca-atrous-resunet": ACAAtrousResUNet(in_ch=1, out_ch=1)
+    }
+    if chosen not in models_map:
+        chosen = preferred_model_name  # fallback
+
+    model = models_map[chosen].to(device)
+
+    # run dummy forward to init lazy modules where possible
+    try:
+        model.eval()
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, img_size, img_size, device=device)
+            _ = model(dummy)
+        model.train()
+    except Exception:
+        # ignore; we'll attempt to load state_dict anyway (lazy modules may be created on first forward)
+        pass
+
+    info_lines = []
+    # try strict load first
+    try:
+        model.load_state_dict(state, strict=True)
+        info_lines.append("Loaded checkpoint with strict=True (all keys matched).")
+        return model, "\n".join(info_lines), chosen
+    except Exception as e:
+        info_lines.append(f"strict load failed: {e}")
+        # attempt partial load by matching shapes
+        n_loaded, n_skipped, loaded_keys, skipped_keys = _partial_load_state_dict(model, state)
+        info_lines.append(f"Partial load: loaded {n_loaded} keys, skipped {n_skipped} keys.")
+        if n_skipped > 0:
+            # include example skipped keys for debugging
+            info_lines.append("Example skipped keys (first 10): " + ", ".join(skipped_keys[:10]))
+        return model, "\n".join(info_lines), chosen
+
+# Replace or call this helper in create_model if you prefer:
+def create_model(model_name: str, device: torch.device, img_size: int, checkpoint_path: str = None) -> nn.Module:
+    """
+    Instantiates the selected model and optionally loads checkpoint via load_model_from_checkpoint to
+    auto-detect architecture and partially load weights where possible.
+    """
+    if checkpoint_path is not None:
+        model, info, chosen = load_model_from_checkpoint(checkpoint_path, preferred_model_name=model_name, device=device, img_size=img_size)
+        print(f"[MODEL LOAD] preferred={model_name}, chosen={chosen}. Info:\n{info}")
+        return model
+
+    # original behavior if no checkpoint requested
     models: Dict[str, nn.Module] = {
         "aca-atrous-unet": ACAAtrousUNet(in_ch=1, out_ch=1, base_ch=64),
         "connect-unet": ConnectUNets(in_ch=1, out_ch=1, base_ch=64),
