@@ -161,9 +161,10 @@ class CancerROIDataset(Dataset):
                 A.HorizontalFlip(p=0.5),
                 A.RandomBrightnessContrast(p=0.2),
                 A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=15, p=0.5),
+                ToTensorV2(),
             ]
         else:
-            transforms = common_transforms
+            transforms = common_transforms + [ToTensorV2()]
         
         return A.Compose(transforms)
 
@@ -193,85 +194,26 @@ class CancerROIDataset(Dataset):
         
         # Ensure correct types
         if not isinstance(img_t, torch.Tensor):
-            img_t = torch.tensor(img_t, dtype=torch.float32)
-        if not isinstance(mask_t, torch.Tensor):
-            mask_t = torch.tensor(mask_t, dtype=torch.float32)
-        
-        # Normalize and reshape
-        img_t = img_t.float() / 255.0
-        mask_t = mask_t.unsqueeze(0).float() / 255.0
-        
-        return img_t, mask_t
-
-# ========================================
-# Mini-DDSM Dataset
-# ========================================
-
-class MiniDDSMDataset(Dataset):
-    """
-    Dataset for Mini-DDSM with metadata from a CSV file.
-    """
-    def __init__(self, csv_file: str, base_dir: str, img_size: Tuple[int, int] = (384, 384), augment: bool = False):
-        df = pd.read_csv(csv_file)
-        self.image_paths = [os.path.join(base_dir, path) for path in df["image_file_path"].tolist()]
-        self.mask_paths = [os.path.join(base_dir, path) if pd.notna(path) else None for path in df["roi_mask_file_path"].tolist()]
-        self.img_size = img_size
-        self.augment = augment
-        self.transform = self._get_transforms()
-
-    def _get_transforms(self):
-        common_transforms = [
-            A.Resize(self.img_size[0], self.img_size[1]),
-        ]
-
-        if self.augment:
-            aug_transforms = [
-                A.HorizontalFlip(p=0.5),
-                A.VerticalFlip(p=0.3),
-                A.Rotate(limit=20, p=0.5),
-                A.RandomBrightnessContrast(p=0.3),
-                A.ElasticTransform(p=0.2),
-            ]
-            transforms = common_transforms + aug_transforms + [ToTensorV2()]
-        else:
-            transforms = common_transforms + [ToTensorV2()]
-
-        return A.Compose(transforms)
-
-    def __len__(self):
-        return len(self.image_paths)
-
-    def __getitem__(self, idx):
-        img = cv2.imread(self.image_paths[idx], cv2.IMREAD_GRAYSCALE)
-        mask = None
-        if self.mask_paths[idx]:
-            mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_GRAYSCALE)
-
-        if img is None:
-            raise RuntimeError(f"Failed to load: {self.image_paths[idx]}")
-
-        if mask is None:
-            mask = np.zeros_like(img, dtype=np.uint8)
-
-        # Binary mask
-        mask = ((mask > 0).astype(np.uint8) * 255)
-
-        augmented = self.transform(image=img, mask=mask)
-
-        # ToTensorV2 converts to tensor automatically
-        img_t = augmented["image"]
-        mask_t = augmented["mask"]
-
-        # Ensure correct types
-        if not isinstance(img_t, torch.Tensor):
             img_t = torch.from_numpy(img_t)
         if not isinstance(mask_t, torch.Tensor):
             mask_t = torch.from_numpy(mask_t)
 
-        # Normalize and reshape
-        img_t = img_t.float() / 255.0
-        mask_t = mask_t.unsqueeze(0).float() / 255.0
+        # Ensure channel dimension is present for image and mask
+        if img_t.ndim == 2:
+            img_t = img_t.unsqueeze(0)
+        # If somehow extra dims exist, reduce to single channel
+        if img_t.ndim == 3 and img_t.shape[0] > 1:
+            img_t = img_t[:1]
 
+        if mask_t.ndim == 2:
+            mask_t = mask_t.unsqueeze(0)
+        if mask_t.ndim == 3 and mask_t.shape[0] > 1:
+            mask_t = mask_t[:1]
+
+        # Normalize to [0,1]
+        img_t = img_t.float() / 255.0
+        mask_t = mask_t.float() / 255.0
+        
         return img_t, mask_t
 
 # ========================================
@@ -931,6 +873,11 @@ def main():
             dataframe=val_df
         )
 
+        # Quick sanity: dataset sizes
+        print(f"Stage 2 train samples (valid files): {len(train_dataset)} | val: {len(val_dataset)}")
+        if len(train_dataset) == 0:
+            raise RuntimeError("Stage 2 training has 0 valid samples after filtering. Check your CSV paths and files exist.")
+
         # Build weighted sampler to mitigate class imbalance (positive vs negative masks)
         # Label 1 if mask has any positive pixels else 0
         labels = []
@@ -944,6 +891,8 @@ def main():
         class_counts[class_counts == 0] = 1
         class_weights = 1.0 / class_counts
         sample_weights = [float(class_weights[l]) for l in labels]
+        if len(sample_weights) == 0:
+            raise RuntimeError("Stage 2: No sample weights computed; training set is empty.")
         sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
 
         train_loader = DataLoader(
