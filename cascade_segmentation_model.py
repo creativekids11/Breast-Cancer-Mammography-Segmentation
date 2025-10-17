@@ -128,21 +128,22 @@ class CancerROIDataset(Dataset):
     def __init__(self, csv_file: Optional[str] = None, img_size: Tuple[int, int] = (384, 384), 
                  augment: bool = False, dataframe: Optional[pd.DataFrame] = None):
         if dataframe is not None:
-            df = dataframe
+            df = dataframe.copy()
         else:
             df = pd.read_csv(csv_file)
         
         # Filter out rows with missing or unreadable files
-        valid_rows = []
-        for _, row in df.iterrows():
+        valid_indices = []
+        for idx, row in df.iterrows():
             img_path = row["image_file_path"]
             mask_path = row["roi_mask_file_path"]
             if os.path.exists(img_path) and (pd.isna(mask_path) or os.path.exists(mask_path)):
-                valid_rows.append(row)
+                valid_indices.append(idx)
             else:
                 print(f"[WARNING] Skipping missing file: {img_path} or {mask_path}")
         
-        df = pd.DataFrame(valid_rows)
+        # Keep only valid rows using index filtering to preserve DataFrame structure
+        df = df.loc[valid_indices].reset_index(drop=True)
         
         self.image_paths = df["image_file_path"].tolist()
         self.mask_paths = df["roi_mask_file_path"].tolist()
@@ -912,11 +913,10 @@ def main():
         print("="*60)
         
         if not os.path.exists(args.stage2_checkpoint_dir):
-            os.makedirs(args.stage2_checkpoint_dir)
+            os.makedirs(args.stage2_checkpoint_dir, exist_ok=True)
         
         df = pd.read_csv(args.cancer_csv)
-        df["image_file_path"] = df["image_file_path"].apply(lambda x: os.path.join(args.tissue_data_dir, x))
-        df["roi_mask_file_path"] = df["roi_mask_file_path"].apply(lambda x: os.path.join(args.tissue_data_dir, x) if pd.notna(x) else None)
+        # For Stage 2, use image and mask paths directly from CSV (do not prepend tissue_data_dir)
         
         train_df, val_df = train_test_split(df, test_size=0.2, random_state=42)
         
