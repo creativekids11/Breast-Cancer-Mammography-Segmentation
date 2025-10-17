@@ -130,5 +130,5 @@ def cleanse_dataset(csv_path, save_csv="cbis_ddsm_cleansed.csv", visualize=True)
 
 
 if __name__ == "__main__":
-    csv_path = "D:/Hackathon2.0/BreastCancerAI/CBIS-DDSM/merge_mass.csv"  # update to your actual CSV
+    csv_path = "CBIS-DDSM/merge_mass.csv"  # update to your actual CSV
     cleanse_dataset(csv_path, save_csv="cbis_ddsm_cleansed.csv", visualize=True)
