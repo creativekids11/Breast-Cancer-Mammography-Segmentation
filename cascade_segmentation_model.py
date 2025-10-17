@@ -531,7 +531,7 @@ def train_stage1(model, train_loader, val_loader, args):
     ce_criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr_stage1, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=10, T_mult=2, eta_min=1e-6
+        optimizer, T_0=10, T_mult=2, eta_min=5e-5
     )
 
     # TensorBoard
@@ -918,3 +918,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
