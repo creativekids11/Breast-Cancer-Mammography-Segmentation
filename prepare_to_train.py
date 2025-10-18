@@ -120,7 +120,7 @@ def normalize_mini_path_token(s: str) -> str:
     s2 = s2.replace('\\', os.sep).replace('/', os.sep)
     # Collapse duplicate separators
     sep = re.escape(os.sep)
-    s2 = re.sub(rf'{sep}+', os.sep, s2)
+    s2 = re.sub(f'{sep}+', os.sep.replace('\\', r'\\'), s2)
     return s2
 
 def generate_candidate_paths(raw_ref: str, base_dir: Optional[str], csv_dir: Optional[str]) -> List[Path]:
@@ -788,6 +788,9 @@ def main(args):
         mini2_base = mini2_alternative
     else:
         mini2_base = mini2_base_candidate
+    
+    # Define mini2_excel for the MoreThanTwoMasks dataset
+    mini2_excel = mini2_base / "DataWMask.xlsx"
 
     output_csv = workspace / "unified_segmentation_dataset.csv"
     outdir = workspace / "data_files"
@@ -807,7 +810,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Create dataset workspace using relative paths and integrated processing")
     parser.add_argument("--workspace", default="./Breast-Cancer-AI", help="Workspace root (relative)")
-    parser.add_argument("--zips-dir", default="./drive/MyDrive", help="Directory containing dataset zip files")
+    parser.add_argument("--zips-dir", default="./zips/", help="Directory containing dataset zip files")
     parser.add_argument("--cbis-zip", default="", help="Optional explicit CBIS zip filename (overrides auto-detection)")
     parser.add_argument("--mini1-zip", default="", help="Optional explicit MINI zip filename (overrides auto-detection)")
     parser.add_argument("--mini2-zip", default="", help="Optional explicit MINI_MORE zip filename (overrides auto-detection)")
