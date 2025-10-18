@@ -163,7 +163,6 @@ def generate_candidate_paths(raw_ref: str, base_dir: Optional[str], csv_dir: Opt
     seen = set()
     res: List[Path] = []
     for c in candidates:
-        # convert to Path and avoid duplicates by normalized string
         try:
             key = str(c)
         except Exception:
@@ -172,6 +171,99 @@ def generate_candidate_paths(raw_ref: str, base_dir: Optional[str], csv_dir: Opt
             seen.add(key)
             res.append(c)
     return res
+
+# ---------------- Special heuristics for MoreThanTwoMasks layout ---------------- #
+def resolve_mini2_base(workspace: Path) -> Path:
+    """
+    Return the correct base directory for the 'mini2' dataset inside the workspace.
+    Tries multiple plausible folder names that people use in different extractions.
+    """
+    candidates = [
+        workspace / "Data-MoreThanTwoMasks",
+        workspace / "MoreThanTwoMasks",
+        workspace / "Data-MoreThanTwoMasks-MINI",
+        workspace / "MoreThanTwoMasks-MINI",
+        workspace / "Data-MoreThanTwoMasks_Complete",
+    ]
+    for c in candidates:
+        if c.exists() and c.is_dir():
+            return c
+    # fallback to the first candidate even if missing (calling code should check exists)
+    return candidates[0]
+
+def try_resolve_mini_image_in_class_dirs(raw: str, base_dir: Path) -> Optional[Path]:
+    """
+    Given a raw token (already normalized), try to resolve to a file by inspecting
+    the base_dir subfolders. Heuristics:
+      - If token contains a class+id like 'Cancer48' -> split into 'Cancer' + '48' and look under base_dir/Cancer/0048
+      - If filename contains digits (e.g. C_0048_1.*) extract digits and look under any subdir/*/<padded_id>
+      - Fall back to searching each subdir/<padded_id> for the basename.
+    """
+    if not base_dir.exists():
+        return None
+    norm = normalize_mini_path_token(raw)
+    parts = Path(norm).parts
+    basename = Path(norm).name
+
+    # 1) look for a part like Cancer48 or Normal13
+    for part in parts:
+        m = re.match(r'^([A-Za-z]+)(\d+)$', part)
+        if m:
+            class_name = m.group(1)
+            num = m.group(2)
+            try:
+                num_i = int(num)
+                padded = f"{num_i:04d}"
+            except Exception:
+                padded = num.zfill(4)
+            # try candidate dir names (preserve original capitalization)
+            possible_class_dirs = []
+            possible_class_dirs.append(class_name)
+            possible_class_dirs.append(class_name.capitalize())
+            possible_class_dirs.append(class_name.upper())
+            possible_class_dirs.append(class_name.lower())
+            # try each class dir / padded / basename
+            for class_dir in possible_class_dirs:
+                cand_root = base_dir / class_dir / padded
+                if cand_root.exists():
+                    # try to find the exact basename under this folder (or subfolders)
+                    found = find_file_by_basename(cand_root, basename, maxdirs=5000)
+                    if found:
+                        return found
+                    # try simple file names inside folder (maybe images are stored differently)
+                    possible_file = cand_root / basename
+                    if possible_file.exists():
+                        return possible_file
+
+    # 2) Extract digits from basename and search all subdirs/<padded>
+    nums = re.findall(r'(\d{1,6})', basename)
+    if nums:
+        num = nums[0]
+        try:
+            padded = f"{int(num):04d}"
+        except Exception:
+            padded = num.zfill(4)
+        # iterate subdirs in base_dir
+        for sub in base_dir.iterdir():
+            if not sub.is_dir():
+                continue
+            candidate_dir = sub / padded
+            if candidate_dir.exists():
+                # search for file by basename
+                found = find_file_by_basename(candidate_dir, basename, maxdirs=5000)
+                if found:
+                    return found
+                # also try any file in candidate_dir with same prefix (e.g. prefix matching)
+                for f in candidate_dir.iterdir():
+                    if f.is_file() and basename.split('.')[0] in f.name:
+                        return f
+
+    # 3) Try a shallow basename search under base_dir (limit depth)
+    found = find_file_by_basename(base_dir, basename, maxdirs=5000)
+    if found:
+        return found
+
+    return None
 
 # ---------------- New: rewrite CSV to point to files inside workspace ---------------- #
 def make_paths_relative_in_csv(orig_csv_path: Path, cbis_workspace_dir: Path) -> Path:
@@ -436,6 +528,15 @@ def process_mini_ddsm(excel_path: str, base_dir: str, mask_outdir: str, image_ou
     else:
         df = pd.read_csv(excel_path)
     rows = []
+
+    # for mini2 special resolution, try to find actual base folder name
+    base_dir_path = Path(base_dir)
+    # prefer actual folder names that exist (support alternative names)
+    if "MoreThanTwoMasks" in str(base_dir_path.name):
+        resolved_mini2_base = resolve_mini2_base(workspace)
+        if resolved_mini2_base.exists():
+            base_dir_path = resolved_mini2_base
+
     for idx, r in df.iterrows():
         img_rel = r.get("fullPath") or r.get("fileName")
         if pd.isna(img_rel):
@@ -444,30 +545,37 @@ def process_mini_ddsm(excel_path: str, base_dir: str, mask_outdir: str, image_ou
         # normalize token first so backslash escapes become usable
         norm_img_rel = normalize_mini_path_token(img_rel)
         # generate candidates (handles 'Benign\0029\...' tokens)
-        candidates = generate_candidate_paths(norm_img_rel, base_dir=base_dir, csv_dir=csv_dir)
+        candidates = generate_candidate_paths(norm_img_rel, base_dir=str(base_dir_path), csv_dir=csv_dir)
         resolved_img = None
         for c in candidates:
             if c.exists():
                 resolved_img = c
                 break
+        # if not found, try searching for basename under base_dir path (fast)
         if resolved_img is None:
-            # try basename search
             basename = Path(norm_img_rel).name
-            found = find_file_by_basename(Path(base_dir), basename)
+            found = find_file_by_basename(base_dir_path, basename)
             if found:
                 resolved_img = found
+        # if still None, try more advanced heuristic for MoreThanTwoMasks layout
         if resolved_img is None:
-            # try directory-of-base search with normalized token
-            cand2 = Path(base_dir) / norm_img_rel
+            # try splitting class+id and searching under base_dir/<Class>/<0001>/...
+            found2 = try_resolve_mini_image_in_class_dirs(norm_img_rel, base_dir_path)
+            if found2:
+                resolved_img = found2
+        # try join of base_dir + norm_img_rel
+        if resolved_img is None:
+            cand2 = Path(base_dir_path) / norm_img_rel
             if cand2.exists():
                 resolved_img = cand2
+        # as last attempt try csv_dir relative
         if resolved_img is None:
-            # final attempt: check csv_dir relative
             cand3 = Path(csv_dir) / norm_img_rel
             if cand3.exists():
                 resolved_img = cand3
+
         if resolved_img is None:
-            print(f"[WARN] MINI: image not found (attempted normalized): {Path(base_dir) / norm_img_rel}")
+            print(f"[WARN] MINI: image not found (attempted normalized): {Path(base_dir_path) / norm_img_rel}")
             continue
         img = cv2.imread(str(resolved_img), cv2.IMREAD_GRAYSCALE)
         if img is None:
@@ -486,7 +594,7 @@ def process_mini_ddsm(excel_path: str, base_dir: str, mask_outdir: str, image_ou
         resolved_masks = []
         for cand in mask_candidates:
             cand_norm = normalize_mini_path_token(cand)
-            mcands = generate_candidate_paths(cand_norm, base_dir=base_dir, csv_dir=csv_dir)
+            mcands = generate_candidate_paths(cand_norm, base_dir=str(base_dir_path), csv_dir=csv_dir)
             resolved_mask = None
             for m in mcands:
                 if m.exists():
@@ -497,7 +605,7 @@ def process_mini_ddsm(excel_path: str, base_dir: str, mask_outdir: str, image_ou
                 if possible.exists():
                     resolved_mask = possible
             if resolved_mask is None:
-                found = find_file_by_basename(Path(base_dir), Path(cand_norm).name)
+                found = find_file_by_basename(base_dir_path, Path(cand_norm).name)
                 if found:
                     resolved_mask = found
             if resolved_mask is not None:
@@ -555,11 +663,13 @@ def process_datasets_and_save(cbis_csv: Optional[str],
                                 contour_columns=["Tumour_Contour", "Tumour_Contour2"])
     mini2_df = pd.DataFrame([])
     if mini2_excel and os.path.exists(mini2_excel) and mini2_base_dir and os.path.exists(mini2_base_dir):
+        # try to resolve actual base name (support alternative folder names)
+        resolved_mini2_base = resolve_mini2_base(workspace)
         mini2_img_dir = os.path.join(outdir, "MINI2_IMAGES")
         mini2_mask_dir = os.path.join(outdir, "MINI2_MASKS")
         ensure_dir(Path(mini2_img_dir)); ensure_dir(Path(mini2_mask_dir))
         print("[INFO] Processing Mini-DDSM Data-MoreThanTwoMasks (supports 3+ masks)...")
-        mini2_df = process_mini_ddsm(mini2_excel, mini2_base_dir, mini2_mask_dir, mini2_img_dir, workspace,
+        mini2_df = process_mini_ddsm(mini2_excel, str(resolved_mini2_base), mini2_mask_dir, mini2_img_dir, workspace,
                                      contour_columns=["Tumour_Contour", "Tumour_Contour2", "Tumour_Contour3"])
         if not mini2_df.empty:
             mini2_df["dataset"] = "Mini-DDSM-MoreThanTwoMasks"
@@ -671,8 +781,14 @@ def main(args):
 
     mini_excel = workspace / "MINI-DDSM-Complete-JPEG-8" / "DataWMask.xlsx"
     mini_base = workspace / "MINI-DDSM-Complete-JPEG-8"
-    mini2_excel = workspace / "Data-MoreThanTwoMasks" / "Data-MoreThanTwoMasks.xlsx"
-    mini2_base = workspace / "Data-MoreThanTwoMasks"
+    # try alternative names for mini2 base
+    mini2_base_candidate = workspace / "Data-MoreThanTwoMasks"
+    mini2_alternative = resolve_mini2_base(workspace)
+    if mini2_alternative.exists():
+        mini2_base = mini2_alternative
+    else:
+        mini2_base = mini2_base_candidate
+
     output_csv = workspace / "unified_segmentation_dataset.csv"
     outdir = workspace / "data_files"
 
