@@ -8,6 +8,8 @@
 - Then run it to get fully prepared zip file ready for training!
 - just run the cmd in the respective folder of the code including the `sh` or `cmd` files and run them to start training!
 
+<hr>
+
 In this 2nd stage breast cancer segmentation model is trained on data of `The Complete Mini-DDSM` (5 gb) and `CBIS-DDSM`.
 With the stage 1 model trained on data given on: https://github.com/tiryakiv/Mammogram-segmentation
 A lot thanks for the data providers to give the data for free
