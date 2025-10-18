@@ -425,17 +425,10 @@ def process_cbis(input_csv: str, mask_outdir: str, image_outdir: str, workspace:
                     resolved = found
             if resolved:
                 mask_paths_resolved.append(str(resolved))
-        merged_mask = None
-        for mp in mask_paths_resolved:
-            try:
-                mask = cv2.imread(mp, cv2.IMREAD_GRAYSCALE)
-            except Exception:
-                mask = None
-            if mask is None:
-                continue
-            mask = (mask > 0).astype(np.uint8) * 255
-            merged_mask = mask if merged_mask is None else cv2.bitwise_or(merged_mask, mask)
-        # image resolution
+        # Note: collect resolved mask paths and merge later (after reading image)
+        # to ensure we can resize masks to the image target size before any
+        # bitwise operations (avoids OpenCV size mismatch errors when masks
+        # come from different sources/sizes).
         image_candidates = generate_candidate_paths(img_path_raw, base_dir=str(workspace / "CBIS-DDSM"), csv_dir=csv_dir)
         resolved_img = None
         for c in image_candidates:
@@ -461,10 +454,9 @@ def process_cbis(input_csv: str, mask_outdir: str, image_outdir: str, workspace:
             print(f"[WARN] CBIS: cannot read image {resolved_img}")
             continue
         processed_img = preprocess_image_simple(full_img)
-        if merged_mask is None:
-            merged_mask = np.zeros_like(processed_img, dtype=np.uint8)
-        if merged_mask.shape != processed_img.shape:
-            merged_mask = cv2.resize(merged_mask, (processed_img.shape[1], processed_img.shape[0]), interpolation=cv2.INTER_NEAREST)
+        # Merge masks safely: resize each mask to the processed image size as needed.
+        target_h, target_w = processed_img.shape[:2]
+        merged_mask = _merge_mask_files(mask_paths_resolved, (target_h, target_w))
         basename = Path(resolved_img).stem
         abn_str = "-".join(abnormality_ids) if abnormality_ids else "NA"
         unique_name = f"CBIS_{pid}_{basename}_{abn_str}"
@@ -524,7 +516,21 @@ def process_mini_ddsm(excel_path: str, base_dir: str, mask_outdir: str, image_ou
         return pd.DataFrame([])
     csv_dir = os.path.dirname(os.path.abspath(excel_path))
     if str(excel_path).lower().endswith((".xlsx", ".xls")):
-        df = pd.read_excel(excel_path, sheet_name="Data")
+        try:
+            df = pd.read_excel(excel_path, sheet_name="Data")
+        except Exception as e:
+            # pandas will raise if the engine (openpyxl) is missing or other problems
+            if 'openpyxl' in str(e).lower() or isinstance(e, ImportError):
+                print("[ERROR] Missing optional dependency 'openpyxl'.  Use pip or conda to install openpyxl.")
+                raise
+            else:
+                print(f"[WARN] Failed to read Excel {excel_path}: {e}. Trying CSV fallback if available.")
+                # try CSV fallback
+                csv_fallback = Path(excel_path).with_suffix('.csv')
+                if csv_fallback.exists():
+                    df = pd.read_csv(csv_fallback)
+                else:
+                    raise
     else:
         df = pd.read_csv(excel_path)
     rows = []
