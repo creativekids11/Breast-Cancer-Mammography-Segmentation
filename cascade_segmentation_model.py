@@ -33,6 +33,70 @@ from albumentations.pytorch import ToTensorV2
 import segmentation_models_pytorch as smp
 import torchvision
 
+# -------------------------
+# Utility: find files by basename under search dirs
+# -------------------------
+def find_file_in_dirs(filename: str, search_dirs: List[str]) -> Optional[str]:
+    """
+    Search for `filename` (exact match) inside directories listed in `search_dirs`.
+    Returns absolute path to first match or None if not found.
+    """
+    # If filename is already absolute and exists -> return it
+    if os.path.isabs(filename) and os.path.exists(filename):
+        return os.path.abspath(filename)
+
+    # If filename is a relative path and exists -> return absolute path
+    if os.path.exists(filename):
+        return os.path.abspath(filename)
+
+    # Search by basename match (case-sensitive). If input contains dirs, strip to basename.
+    target_basename = os.path.basename(filename)
+
+    for d in search_dirs:
+        if not d:
+            continue
+        for root, _, files in os.walk(d):
+            if target_basename in files:
+                return os.path.abspath(os.path.join(root, target_basename))
+    return None
+
+def normalize_csv_paths(df: pd.DataFrame, image_col: str, mask_col: str, search_dirs: List[str]) -> pd.DataFrame:
+    """
+    For rows where image_col or mask_col paths are missing on disk, try to locate files
+    by basename in `search_dirs` and replace with relative paths (relative to cwd).
+    Returns a new DataFrame with updated paths.
+    """
+    df = df.copy()
+    cwd = os.getcwd()
+    updated_count = 0
+    for idx, row in df.iterrows():
+        # IMAGE
+        img_path = str(row[image_col])
+        if not img_path or not os.path.exists(img_path):
+            found = find_file_in_dirs(img_path, search_dirs)
+            if found:
+                rel = os.path.relpath(found, start=cwd)
+                df.at[idx, image_col] = rel
+                updated_count += 1
+            # else keep original (will be flagged later)
+
+        # MASK
+        mask_path = row.get(mask_col, "")
+        if pd.isna(mask_path) or str(mask_path).strip() == "":
+            # keep as empty string (no mask)
+            df.at[idx, mask_col] = ""
+        else:
+            mask_path = str(mask_path)
+            if not os.path.exists(mask_path):
+                found_m = find_file_in_dirs(mask_path, search_dirs)
+                if found_m:
+                    relm = os.path.relpath(found_m, start=cwd)
+                    df.at[idx, mask_col] = relm
+                    updated_count += 1
+                # else keep original (will be flagged later)
+    print(f"[INFO] normalize_csv_paths: updated {updated_count} paths by searching {len(search_dirs)} directories.")
+    return df
+
 # ========================================
 # Stage 1: Tissue Segmentation Dataset
 # ========================================
@@ -44,6 +108,7 @@ class TissueSegmentationDataset(Dataset):
     """
     def __init__(self, image_paths: List[str], mask_paths: List[str], 
                  img_size: Tuple[int, int] = (512, 512), augment: bool = False):
+        assert len(image_paths) == len(mask_paths), "image_paths and mask_paths must be same length"
         self.image_paths = image_paths
         self.mask_paths = mask_paths
         self.img_size = img_size
@@ -88,11 +153,13 @@ class TissueSegmentationDataset(Dataset):
     
     def __getitem__(self, idx):
         # Load image and mask
-        img = cv2.imread(self.image_paths[idx], cv2.IMREAD_GRAYSCALE)
-        mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_GRAYSCALE)
+        img_path = self.image_paths[idx]
+        mask_path = self.mask_paths[idx]
+        img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         
         if img is None or mask is None:
-            raise RuntimeError(f"Failed to load: {self.image_paths[idx]}")
+            raise RuntimeError(f"Failed to load: {img_path} or {mask_path}")
         
         # Convert mask to class indices
         mask = self._convert_mask_to_classes(mask)
@@ -123,30 +190,47 @@ class TissueSegmentationDataset(Dataset):
 class CancerROIDataset(Dataset):
     """
     Dataset for Stage 2: Binary cancer segmentation within FGT regions
-    This uses the original cancer segmentation CSV
+    Accepts either a CSV file path or a prepared DataFrame with columns:
+      - image_file_path
+      - roi_mask_file_path  (can be empty)
     """
     def __init__(self, csv_file: Optional[str] = None, img_size: Tuple[int, int] = (384, 384), 
-                 augment: bool = False, dataframe: Optional[pd.DataFrame] = None):
+                 augment: bool = False, dataframe: Optional[pd.DataFrame] = None, search_dirs: Optional[List[str]] = None):
         if dataframe is not None:
             df = dataframe.copy()
         else:
+            if csv_file is None:
+                raise ValueError("Either csv_file or dataframe must be provided to CancerROIDataset")
+            if not os.path.exists(csv_file):
+                raise FileNotFoundError(f"CSV file not found: {csv_file}")
             df = pd.read_csv(csv_file)
         
+        # For safety: ensure columns exist
+        if "image_file_path" not in df.columns or "roi_mask_file_path" not in df.columns:
+            raise ValueError("CSV/DataFrame must contain 'image_file_path' and 'roi_mask_file_path' columns")
+        
+        # If user passed search_dirs, attempt to normalize missing paths before filtering
+        if search_dirs:
+            df = normalize_csv_paths(df, "image_file_path", "roi_mask_file_path", search_dirs)
+        
         # Filter out rows with missing or unreadable files
-        valid_indices = []
+        valid_image_paths = []
+        valid_mask_paths = []
         for idx, row in df.iterrows():
-            img_path = row["image_file_path"]
+            img_path = str(row["image_file_path"])
             mask_path = row["roi_mask_file_path"]
-            if os.path.exists(img_path) and (pd.isna(mask_path) or os.path.exists(mask_path)):
-                valid_indices.append(idx)
+            mask_path = str(mask_path) if pd.notna(mask_path) and str(mask_path).strip() != "" else ""
+            if os.path.exists(img_path):
+                if mask_path == "" or os.path.exists(mask_path):
+                    valid_image_paths.append(img_path)
+                    valid_mask_paths.append(mask_path)
+                else:
+                    print(f"[WARNING] Skipping row {idx}: mask not found -> {mask_path}")
             else:
-                print(f"[WARNING] Skipping missing file: {img_path} or {mask_path}")
+                print(f"[WARNING] Skipping row {idx}: image not found -> {img_path}")
         
-        # Keep only valid rows using index filtering to preserve DataFrame structure
-        df = df.loc[valid_indices].reset_index(drop=True)
-        
-        self.image_paths = df["image_file_path"].tolist()
-        self.mask_paths = df["roi_mask_file_path"].tolist()
+        self.image_paths = valid_image_paths
+        self.mask_paths = valid_mask_paths
         self.img_size = img_size
         self.augment = augment
         self.transform = self._get_transforms()
@@ -174,8 +258,9 @@ class CancerROIDataset(Dataset):
     def __getitem__(self, idx):
         img = cv2.imread(self.image_paths[idx], cv2.IMREAD_GRAYSCALE)
         mask = None
-        if self.mask_paths[idx]:
-            mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_GRAYSCALE)
+        mask_path = self.mask_paths[idx] if idx < len(self.mask_paths) else ""
+        if mask_path:
+            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         
         if img is None:
             raise RuntimeError(f"Failed to load: {self.image_paths[idx]}")
@@ -183,7 +268,7 @@ class CancerROIDataset(Dataset):
         if mask is None:
             mask = np.zeros_like(img, dtype=np.uint8)
         
-        # Binary mask
+        # Binary mask (0 or 255)
         mask = ((mask > 0).astype(np.uint8) * 255)
         
         augmented = self.transform(image=img, mask=mask)
@@ -201,7 +286,6 @@ class CancerROIDataset(Dataset):
         # Ensure channel dimension is present for image and mask
         if img_t.ndim == 2:
             img_t = img_t.unsqueeze(0)
-        # If somehow extra dims exist, reduce to single channel
         if img_t.ndim == 3 and img_t.shape[0] > 1:
             img_t = img_t[:1]
 
@@ -330,7 +414,7 @@ class ACAAtrousResUNet(nn.Module):
     """ACA-ResUNet for multi-class or binary segmentation"""
     def __init__(self, in_ch=1, out_ch=4, encoder_name="resnet34"):
         super().__init__()
-        # Use SMP encoder
+        # Use SMP Unet as encoder body, then replace decoder with ACA blocks
         self.encoder = smp.Unet(
             encoder_name=encoder_name, 
             encoder_weights="imagenet" if in_ch == 3 else None,
@@ -339,10 +423,11 @@ class ACAAtrousResUNet(nn.Module):
         )
         encoder_channels = self.encoder.encoder.out_channels
         
-        # ASPP bottleneck
+        # ASPP bottleneck (use last encoder channel -> produce feature map with earlier out_ch size)
         self.aspp = ASPP(in_ch=encoder_channels[-1], out_ch=encoder_channels[-2])
         
         # Decoder with ACA
+        # create UpACA with appropriate out_ch sizes
         self.up_aca1 = UpACA(out_ch=encoder_channels[-3])
         self.up_aca2 = UpACA(out_ch=encoder_channels[-4])
         self.up_aca3 = UpACA(out_ch=encoder_channels[-5])
@@ -353,6 +438,7 @@ class ACAAtrousResUNet(nn.Module):
     def forward(self, x):
         # Encode
         feats = self.encoder.encoder(x)
+        # feats is a list of encoder feature maps
         if len(feats) >= 6:
             e1, e2, e3, e4, bottleneck = feats[1], feats[2], feats[3], feats[4], feats[5]
         else:
@@ -396,50 +482,57 @@ class CascadeSegmentationModel(nn.Module):
             self.stage2_model.load_state_dict(torch.load(stage2_weights, map_location=device))
             print(f"Loaded Stage 2 weights from {stage2_weights}")
     
-    def extract_fgt_roi(self, image, tissue_mask, padding=20):
+    def extract_fgt_roi(self, image: torch.Tensor, tissue_mask: torch.Tensor, padding=20, target_size=(384,384)):
         """
         Extract FGT (fibroglandular tissue) region from image
-        tissue_mask: predicted tissue segmentation (argmax of stage 1)
-        Returns cropped image focused on FGT region
+        tissue_mask: predicted tissue segmentation (argmax of stage 1) shape [B,1,H,W]
+        image: original image tensor [B, C, H, W]
+        Returns cropped batch tensor sized to target_size
         """
-        # FGT is class 2
+        # Convert tissue mask to CPU numpy for bbox extraction
         fgt_mask = (tissue_mask == 2).cpu().numpy().astype(np.uint8)
         
         batch_crops = []
-        for b in range(fgt_mask.shape[0]):
-            fgt_b = fgt_mask[b, 0]  # HxW
+        B = fgt_mask.shape[0]
+        for b in range(B):
+            if fgt_mask.ndim == 4:
+                fgt_b = fgt_mask[b, 0]
+            elif fgt_mask.ndim == 3:
+                fgt_b = fgt_mask[b]
+            else:
+                raise RuntimeError("Unexpected fgt_mask shape")
             
-            # Find bounding box
             rows = np.any(fgt_b, axis=1)
             cols = np.any(fgt_b, axis=0)
             
             if rows.sum() == 0 or cols.sum() == 0:
-                # No FGT found, use full image
-                crop = image[b]
+                crop = image[b]  # full image
             else:
                 rmin, rmax = np.where(rows)[0][[0, -1]]
                 cmin, cmax = np.where(cols)[0][[0, -1]]
                 
-                # Add padding
                 h, w = fgt_b.shape
                 rmin = max(0, rmin - padding)
-                rmax = min(h, rmax + padding)
+                rmax = min(h - 1, rmax + padding)
                 cmin = max(0, cmin - padding)
-                cmax = min(w, cmax + padding)
+                cmax = min(w - 1, cmax + padding)
                 
-                # Crop
-                crop = image[b, :, rmin:rmax, cmin:cmax]
+                crop = image[b, :, rmin:(rmax + 1), cmin:(cmax + 1)]
             
-            # Resize to fixed size for stage 2
+            if not torch.is_floating_point(crop):
+                crop = crop.float()
             crop_resized = F.interpolate(
                 crop.unsqueeze(0), 
-                size=(384, 384), 
+                size=target_size, 
                 mode='bilinear', 
                 align_corners=False
             )
             batch_crops.append(crop_resized)
         
-        return torch.cat(batch_crops, dim=0)
+        if len(batch_crops) == 0:
+            resized = F.interpolate(image, size=target_size, mode='bilinear', align_corners=False)
+            return resized
+        return torch.cat(batch_crops, dim=0).to(image.device)
     
     def forward(self, x, return_stage1=False):
         """
@@ -544,6 +637,7 @@ def train_stage1(model, train_loader, val_loader, args):
         # Training
         model.train()
         train_loss = 0.0
+        train_steps = 0
 
         pbar = tqdm(train_loader, desc=f"Stage1 Train E{epoch}/{args.epochs_stage1}")
         for imgs, masks in pbar:
@@ -562,15 +656,17 @@ def train_stage1(model, train_loader, val_loader, args):
             optimizer.step()
 
             train_loss += loss.item()
+            train_steps += 1
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
-        avg_train_loss = train_loss / len(train_loader)
+        avg_train_loss = train_loss / max(1, train_steps)
         writer.add_scalar("train/loss", avg_train_loss, epoch)
 
         # Validation
         model.eval()
         val_loss = 0.0
         val_dice = 0.0
+        val_steps = 0
 
         with torch.no_grad():
             for imgs, masks in tqdm(val_loader, desc=f"Stage1 Val E{epoch}"):
@@ -588,9 +684,10 @@ def train_stage1(model, train_loader, val_loader, args):
                 intersection = (fgt_pred * fgt_target).sum()
                 dice = (2. * intersection + 1e-5) / (fgt_pred.sum() + fgt_target.sum() + 1e-5)
                 val_dice += dice.item()
+                val_steps += 1
 
-        avg_val_loss = val_loss / len(val_loader)
-        avg_val_dice = val_dice / len(val_loader)
+        avg_val_loss = val_loss / max(1, val_steps)
+        avg_val_dice = val_dice / max(1, val_steps)
 
         writer.add_scalar("val/loss", avg_val_loss, epoch)
         writer.add_scalar("val/dice_fgt", avg_val_dice, epoch)
@@ -641,6 +738,7 @@ def train_stage2(model, train_loader, val_loader, args):
         # Training
         model.train()
         train_loss = 0.0
+        train_steps = 0
 
         pbar = tqdm(train_loader, desc=f"Stage2 Train E{epoch}/{args.epochs_stage2}")
         for imgs, masks in pbar:
@@ -656,15 +754,17 @@ def train_stage2(model, train_loader, val_loader, args):
             optimizer.step()
 
             train_loss += loss.item()
+            train_steps += 1
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
-        avg_train_loss = train_loss / len(train_loader)
+        avg_train_loss = train_loss / max(1, train_steps)
         writer.add_scalar("train/loss", avg_train_loss, epoch)
 
         # Validation
         model.eval()
         val_loss = 0.0
         val_dice = 0.0
+        val_steps = 0
 
         with torch.no_grad():
             for imgs, masks in tqdm(val_loader, desc=f"Stage2 Val E{epoch}"):
@@ -681,9 +781,10 @@ def train_stage2(model, train_loader, val_loader, args):
                 intersection = (preds_bin * masks).sum()
                 dice = (2. * intersection + 1e-5) / (preds_bin.sum() + masks.sum() + 1e-5)
                 val_dice += dice.item()
+                val_steps += 1
 
-        avg_val_loss = val_loss / len(val_loader)
-        avg_val_dice = val_dice / len(val_loader)
+        avg_val_loss = val_loss / max(1, val_steps)
+        avg_val_dice = val_dice / max(1, val_steps)
 
         writer.add_scalar("val/loss", avg_val_loss, epoch)
         writer.add_scalar("val/dice", avg_val_dice, epoch)
@@ -715,13 +816,13 @@ def train_stage2(model, train_loader, val_loader, args):
 def get_args():
     parser = argparse.ArgumentParser(description="Cascade Staged Segmentation Model")
     
-    # Data paths
+    # Data paths (defaults are repository-relative)
     parser.add_argument("--tissue-data-dir", type=str, 
                        default="segmentation_data/train_valid",
-                       help="Path to tissue segmentation data")
+                       help="Path to tissue segmentation data (relative)")
     parser.add_argument("--cancer-csv", type=str,
                        default="unified_segmentation_dataset.csv",
-                       help="Path to cancer segmentation CSV")
+                       help="Path to cancer segmentation CSV (relative)")
     
     # Stage 1 parameters
     parser.add_argument("--epochs-stage1", type=int, default=30,
@@ -770,29 +871,81 @@ def get_args():
     return parser.parse_args()
 
 def prepare_tissue_data(data_dir: str, val_split: float = 0.2):
-    """Prepare tissue segmentation dataset"""
+    """Prepare tissue segmentation dataset (robust to extensions and mask suffixes)."""
     img_dir = Path(data_dir) / "fgt_seg"
     label_dir = Path(data_dir) / "fgt_seg_labels"
-    
-    # Get all image files
-    img_files = sorted(list(img_dir.glob("*.png")))
-    
+
+    # Accept common image extensions and search recursively
+    exts = [".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"]
+    img_files = []
+    if img_dir.exists():
+        for ext in exts:
+            img_files.extend(list(img_dir.rglob(f"*{ext}")))
+    else:
+        print(f"[WARN] Image directory not found: {img_dir}")
+
+    img_files = sorted(set(img_files))
+
     image_paths = []
     mask_paths = []
-    
+
+    # Helper mask name candidates (stem variations)
+    mask_suffixes = ["_LI", "_mask", "_label", ""]  # "" means same stem
     for img_file in img_files:
-        mask_file = label_dir / (img_file.stem + "_LI.png")
-        if mask_file.exists():
+        stem = img_file.stem
+        found_mask = None
+
+        # First try common suffix patterns in the label_dir
+        if label_dir.exists():
+            for suffix in mask_suffixes:
+                for ext in exts:
+                    candidate = label_dir / f"{stem}{suffix}{ext}"
+                    if candidate.exists():
+                        found_mask = candidate
+                        break
+                if found_mask:
+                    break
+
+        # If not found, try same folder as image (maybe labels placed beside images)
+        if found_mask is None:
+            for suffix in mask_suffixes:
+                for ext in exts:
+                    candidate = img_file.parent / f"{stem}{suffix}{ext}"
+                    if candidate.exists():
+                        found_mask = candidate
+                        break
+                if found_mask:
+                    break
+
+        # If still not found, try any file in label_dir that contains the stem
+        if found_mask is None and label_dir.exists():
+            for p in label_dir.rglob("*"):
+                if p.is_file() and stem in p.stem:
+                    found_mask = p
+                    break
+
+        if found_mask is not None:
             image_paths.append(str(img_file))
-            mask_paths.append(str(mask_file))
-    
-    print(f"Found {len(image_paths)} tissue segmentation samples")
-    
+            mask_paths.append(str(found_mask))
+        else:
+            # Keep concise: log debug optionally
+            # print(f"[DEBUG] No mask for image: {img_file}")
+            pass
+
+    if len(image_paths) == 0:
+        print(f"[WARN] Found 0 tissue segmentation samples in '{img_dir}' (label dir: '{label_dir}').")
+        print("  - Check folder paths, file extensions, or mask naming conventions.")
+        print("  - Example mask name patterns checked: *_LI.png, *_mask.png, *_label.png, same-stem files.")
+        # Return four empty lists so main() can decide what to do next
+        return [], [], [], []
+
+    print(f"Found {len(image_paths)} tissue segmentation samples (paired images+masks)")
+
     # Train/val split
     train_imgs, val_imgs, train_masks, val_masks = train_test_split(
-        image_paths, mask_paths, test_size=val_split, random_state=42
+        image_paths, mask_paths, test_size=val_split, random_state=42, shuffle=True
     )
-    
+
     return train_imgs, val_imgs, train_masks, val_masks
 
 def main():
@@ -805,7 +958,22 @@ def main():
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    
+
+    # Construct sensible search directories (repo-relative)
+    repo_root = os.getcwd()
+    search_dirs = [
+        os.path.join(repo_root, "data_files"),
+        os.path.join(repo_root, "MINI-DDSM-Complete-JPEG-8"),
+        os.path.join(repo_root, "CBIS-DDSM"),
+        os.path.join(repo_root, "MINI-DDSM-Complete-JPEG-8", "MINI_IMAGES"),
+        os.path.join(repo_root, "data_files", "MINI_IMAGES"),
+        os.path.join(repo_root, "data_files", "CBIS_IMAGES"),
+        repo_root,
+    ]
+    # Filter out non-existing directories to speed search
+    search_dirs = [d for d in search_dirs if os.path.exists(d)]
+    print(f"[INFO] Using {len(search_dirs)} search dirs for resolving CSV paths.")
+
     # ========================================
     # Stage 1: Tissue Segmentation Training
     # ========================================
@@ -816,35 +984,42 @@ def main():
         
         train_imgs, val_imgs, train_masks, val_masks = prepare_tissue_data(args.tissue_data_dir)
         
-        train_dataset = TissueSegmentationDataset(
-            train_imgs, train_masks,
-            img_size=(args.img_size_stage1, args.img_size_stage1),
-            augment=True
-        )
-        val_dataset = TissueSegmentationDataset(
-            val_imgs, val_masks,
-            img_size=(args.img_size_stage1, args.img_size_stage1),
-            augment=False
-        )
-        
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=args.batch_size_stage1,
-            shuffle=True,
-            num_workers=args.num_workers,
-            pin_memory=True
-        )
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=args.batch_size_stage1,
-            shuffle=False,
-            num_workers=args.num_workers,
-            pin_memory=True
-        )
-        
-        # Create and train Stage 1 model
-        stage1_model = ACAAtrousResUNet(in_ch=1, out_ch=4, encoder_name="resnet34")
-        stage1_model = train_stage1(stage1_model, train_loader, val_loader, args)
+        if len(train_imgs) == 0:
+            # Skip Stage 1 training but continue program execution if train_both was set
+            print("[ERROR] No tissue segmentation samples found. Skipping Stage 1 training.")
+            print("  -> If you intended to train Stage 1, verify '--tissue-data-dir' and mask filenames.")
+        else:
+            train_dataset = TissueSegmentationDataset(
+                train_imgs, train_masks,
+                img_size=(args.img_size_stage1, args.img_size_stage1),
+                augment=True
+            )
+            val_dataset = TissueSegmentationDataset(
+                val_imgs, val_masks,
+                img_size=(args.img_size_stage1, args.img_size_stage1),
+                augment=False
+            )
+            
+            train_loader = DataLoader(
+                train_dataset, 
+                batch_size=args.batch_size_stage1,
+                shuffle=True,
+                num_workers=args.num_workers,
+                pin_memory=True
+            )
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=args.batch_size_stage1,
+                shuffle=False,
+                num_workers=args.num_workers,
+                pin_memory=True
+            )
+            
+            # Create and train Stage 1 model
+            stage1_model = ACAAtrousResUNet(in_ch=1, out_ch=4, encoder_name="resnet34")
+            stage1_model = train_stage1(stage1_model, train_loader, val_loader, args)
+    else:
+        print("[INFO] Stage 1 training not requested (use --train-stage1 or --train-both).")
     
     # ========================================
     # Stage 2: Cancer Segmentation Training
@@ -854,37 +1029,54 @@ def main():
         print("Preparing Stage 2: Cancer Segmentation Data")
         print("="*60)
         
-        if not os.path.exists(args.stage2_checkpoint_dir):
-            os.makedirs(args.stage2_checkpoint_dir, exist_ok=True)
+        os.makedirs(args.stage2_checkpoint_dir, exist_ok=True)
         
-        df = pd.read_csv(args.cancer_csv)
-        # For Stage 2, use image and mask paths directly from CSV (do not prepend tissue_data_dir)
-        
+        if not os.path.exists(args.cancer_csv):
+            raise FileNotFoundError(f"Cancer CSV not found: {args.cancer_csv}")
+        df_raw = pd.read_csv(args.cancer_csv)
+        if df_raw.shape[0] == 0:
+            raise RuntimeError("Cancer CSV is empty.")
+        # Normalize CSV paths by searching for missing files under search_dirs
+        df = normalize_csv_paths(df_raw, "image_file_path", "roi_mask_file_path", search_dirs)
+
+        # For Stage 2, use image and mask paths directly from the normalized DataFrame
         train_df, val_df = train_test_split(df, test_size=0.2, random_state=42)
-        
+
         train_dataset = CancerROIDataset(
             img_size=(args.img_size_stage2, args.img_size_stage2),
             augment=True,
-            dataframe=train_df
+            dataframe=train_df,
+            search_dirs=search_dirs
         )
         val_dataset = CancerROIDataset(
             img_size=(args.img_size_stage2, args.img_size_stage2),
             augment=False,
-            dataframe=val_df
+            dataframe=val_df,
+            search_dirs=search_dirs
         )
 
         # Quick sanity: dataset sizes
         print(f"Stage 2 train samples (valid files): {len(train_dataset)} | val: {len(val_dataset)}")
         if len(train_dataset) == 0:
+            # helpful diagnostics: show how many rows had existing images before normalization
+            existing_before = df_raw["image_file_path"].apply(lambda p: os.path.exists(str(p))).sum()
+            existing_after = df["image_file_path"].apply(lambda p: os.path.exists(str(p))).sum()
+            print(f"[ERROR] Stage 2 has 0 valid training samples after normalization.")
+            print(f"  - images existing before normalization: {existing_before}")
+            print(f"  - images existing after normalization:  {existing_after}")
+            print("  - Searched directories:", search_dirs)
+            print("  - Tip: ensure that your image files are located under one of the search directories (data_files, MINI-DDSM-Complete-JPEG-8, CBIS-DDSM) or update the CSV to contain relative paths.")
             raise RuntimeError("Stage 2 training has 0 valid samples after filtering. Check your CSV paths and files exist.")
 
         # Build weighted sampler to mitigate class imbalance (positive vs negative masks)
-        # Label 1 if mask has any positive pixels else 0
         labels = []
         for mpath in train_dataset.mask_paths:
             try:
-                m = cv2.imread(mpath, cv2.IMREAD_GRAYSCALE)
-                labels.append(1 if (m is not None and np.any(m > 0)) else 0)
+                if mpath and os.path.exists(mpath):
+                    m = cv2.imread(mpath, cv2.IMREAD_GRAYSCALE)
+                    labels.append(1 if (m is not None and np.any(m > 0)) else 0)
+                else:
+                    labels.append(0)
             except Exception:
                 labels.append(0)
         class_counts = np.bincount(labels, minlength=2)
@@ -913,9 +1105,10 @@ def main():
         # Create and train Stage 2 model
         stage2_model = ACAAtrousResUNet(in_ch=1, out_ch=1, encoder_name="resnet34")
         stage2_model = train_stage2(stage2_model, train_loader, val_loader, args)
+    else:
+        print("[INFO] Stage 2 training not requested (use --train-stage2 or --train-both).")
     
     print("Training pipeline complete.")
 
 if __name__ == "__main__":
     main()
-
