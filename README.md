@@ -1,8 +1,6 @@
     `Breast Cancer Segmentation` is a project made by ~ Devansh Madake
 <hr>
 
-**NOTE: USE COMMAND `git lfs clone https://github.com/creativekids11/Breast-Cancer-Mammography-Segmentation.git` for cloning this repo, due to large files**
-
 ## Get Started: 
 - Download the prepare_to_train.py only in a new folder
 - Then run it to get fully prepared zip file ready for training!
